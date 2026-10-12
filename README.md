@@ -14,6 +14,10 @@ sits behind one ASP.NET Core API and one Next.js UI, and runs on your own machin
 - **Long-conversation compaction**: old history is summarized instead of dropped
 - **Optional login** through any OAuth2 / OpenID Connect provider (Keycloak, Auth0, Okta, Entra ID, Authentik, ...)
 
+## Demo
+
+[![PersonalAI demo video](https://img.youtube.com/vi/w34h43MJ8cs/maxresdefault.jpg)](https://www.youtube.com/watch?v=w34h43MJ8cs)
+
 > [!WARNING]
 > PersonalAI gives an LLM real capabilities: it can run code in containers, call HTTP endpoints, scan your
 > LAN and (on Windows) drive your mouse and keyboard. **Auth is off by default**, so anyone who can reach
@@ -25,6 +29,7 @@ sits behind one ASP.NET Core API and one Next.js UI, and runs on your own machin
 
 ## Contents
 
+- [Demo](#demo)
 - [Requirements](#requirements)
 - [Quick start: Docker Compose](#quick-start-docker-compose)
 - [Quick start: dotnet run](#quick-start-dotnet-run)
