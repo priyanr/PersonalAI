@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Zero package references on purpose: this project is referenced by both PersonalAI.Core (the API
+       process) and PersonalAI.SandboxHost (a slim Linux Docker-host broker). System.Text.Json and
+       System.Net.WebSockets both ship in the shared framework, so no NuGet package can leak EF Core,
+       FlaUI or anything else that doesn't belong on the broker. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

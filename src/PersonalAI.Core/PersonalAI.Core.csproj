@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageReference Include="FlaUI.UIA3" Version="5.0.0" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PersonalAI.Sandbox.Protocol\PersonalAI.Sandbox.Protocol.csproj" />
+  </ItemGroup>
+
+  <!-- FlaUI.UIA3's interop needs Accessibility.dll, which ships in Microsoft.WindowsDesktop.App — a framework
+       the API doesn't reference — so without this every computer_control `screenshot` throws
+       FileNotFoundException. Ship the runtime's copy alongside the app (flows to referencing projects'
+       output and publish). -->
+  <PropertyGroup>
+    <WindowsDesktopSharedDir>$(NetCoreTargetingPackRoot)\..\shared\Microsoft.WindowsDesktop.App\$(BundledNETCoreAppPackageVersion)</WindowsDesktopSharedDir>
+  </PropertyGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows')) And Exists('$(WindowsDesktopSharedDir)\Accessibility.dll')">
+    <Content Include="$(WindowsDesktopSharedDir)\Accessibility.dll" Link="Accessibility.dll" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

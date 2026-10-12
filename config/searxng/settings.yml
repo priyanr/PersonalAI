@@ -1,0 +1,76 @@
+use_default_settings: true
+
+general:
+  instance_name: "PersonalAI Search"
+  debug: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "change-this-to-a-random-secret-key"
+  limiter: false
+  image_proxy: false
+  port: 8080
+  bind_address: "0.0.0.0"
+
+outgoing:
+  # Default (3.0s) is too tight for this host and was causing Bing to fail
+  # with ConnectTimeout on nearly every query.
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+
+engines:
+  # Google, DuckDuckGo, Mojeek and Startpage reliably bot-detect this host
+  # (403 / CAPTCHA, 24h self-suspension) and Bing serves an unrelated
+  # localized fallback page instead of erroring, so results look "wrong"
+  # rather than missing. Brave is the only one confirmed to return correct
+  # results, so it's the sole engine enabled here.
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: true
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: true
+
+  - name: mojeek
+    engine: mojeek
+    shortcut: mjk
+    disabled: true
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: true
+
+  - name: google news
+    engine: google_news
+    shortcut: gn
+    disabled: true
+
+  - name: brave
+    engine: brave
+    shortcut: br
+    disabled: false
+
+  - name: startpage
+    engine: startpage
+    shortcut: sp
+    disabled: true
+
+  # Disable heavy/unnecessary engines to save resources
+  - name: wikipedia
+    engine: wikipedia
+    disabled: true
+
+  - name: wikidata
+    engine: wikidata
+    disabled: true

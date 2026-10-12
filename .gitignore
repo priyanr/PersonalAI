@@ -1,0 +1,39 @@
+# .NET
+bin/
+obj/
+*.user
+*.db
+*.db-shm
+*.db-wal
+
+# Data (runtime volumes)
+data/ollama/
+data/sqlite/
+data/workspace/
+!data/ollama/.gitkeep
+!data/sqlite/.gitkeep
+!data/workspace/.gitkeep
+
+# API project's own local-dev workspace sandbox (Workspace:RootPath default)
+src/PersonalAI.Api/data/
+
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/out/
+web/.env.local
+
+# Editor / OS
+.vs/
+.vscode/
+*.swp
+.DS_Store
+
+# Env
+.env
+
+# Runtime output
+log-*.txt
+data/tool-output/
+src/PersonalAI.Api/personalai.db*
+*.lnk

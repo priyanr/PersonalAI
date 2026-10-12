@@ -1,0 +1,129 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: personalai-ollama
+    volumes:
+      - ${OLLAMA_DATA_PATH:-./data/ollama}:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: personalai-searxng
+    volumes:
+      - ./config/searxng:/etc/searxng:rw
+    ports:
+      - "8888:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: src/PersonalAI.Api/Dockerfile
+    container_name: personalai-api
+    ports:
+      - "${API_PORT:-5080}:8080"
+    environment:
+      - Ollama__BaseUrl=http://ollama:11434
+      - Search__SearxngUrl=http://searxng:8080
+      - Search__Engines=brave
+      - Workspace__RootPath=/workspace
+      - ConnectionStrings__Default=Data Source=/data/personalai.db
+      - Auth__Enabled=${AUTH_ENABLED:-false}
+      - Auth__Authority=${AUTH_AUTHORITY:-}
+      - Auth__ClientId=${AUTH_CLIENT_ID:-}
+      - Auth__ClientSecret=${AUTH_CLIENT_SECRET:-}
+      - Auth__JwtKey=${AUTH_JWT_KEY:-}
+      - Auth__RedirectUri=${AUTH_REDIRECT_URI:-http://localhost:3000/auth/callback}
+      - Auth__Scope=${AUTH_SCOPE:-openid profile offline_access}
+      - Auth__Audience=${AUTH_AUDIENCE:-}
+      - Auth__Issuer=${AUTH_ISSUER:-}
+      - Auth__PostLogoutRedirectUri=${AUTH_POST_LOGOUT_REDIRECT_URI:-}
+      - Auth__TokenEndpointAuthMethod=${AUTH_TOKEN_ENDPOINT_AUTH_METHOD:-client_secret_post}
+      # Defaults fit a standard OIDC provider (discovery on, no explicit endpoints). For a provider without
+      # discovery, set AUTH_USE_DISCOVERY=false and the endpoints below in .env.
+      - Auth__UseDiscovery=${AUTH_USE_DISCOVERY:-true}
+      - Auth__AuthorizationEndpoint=${AUTH_AUTHORIZATION_ENDPOINT:-}
+      - Auth__TokenEndpoint=${AUTH_TOKEN_ENDPOINT:-}
+      - Auth__RevocationEndpoint=${AUTH_REVOCATION_ENDPOINT:-}
+      - Auth__IntrospectionEndpoint=${AUTH_INTROSPECTION_ENDPOINT:-}
+      - Auth__EndSessionEndpoint=${AUTH_END_SESSION_ENDPOINT:-}
+      # Must be the SAME value the sandboxhost service gets as Broker__HostKey -- the broker presents it
+      # on the WebSocket upgrade and the API compares against this. Empty (the default) disables the
+      # sandbox endpoint entirely, so the broker will connect, be rejected with 401, and retry forever.
+      - Sandbox__HostKey=${SANDBOX_HOST_KEY:-}
+    volumes:
+      - ${SQLITE_DATA_PATH:-./data/sqlite}:/data
+      - ${WORKSPACE_DATA_PATH:-./data/workspace}:/workspace
+    depends_on:
+      ollama:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      # Next.js inlines NEXT_PUBLIC_* into the browser bundle at BUILD time, so this must be a build arg.
+      # It's the URL the *browser* uses to reach the API. Rebuild (`docker compose up -d --build web`)
+      # after changing API_PORT.
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:${API_PORT:-5080}
+    container_name: personalai-web
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Dials out to the API's sandbox WebSocket endpoint and executes commands/file ops for the `sandbox`
+  # tool via the Docker socket. Only useful once the API side (Sandbox:HostKey, Sandbox:Enabled) is
+  # configured to match SANDBOX_HOST_KEY below -- see src/PersonalAI.SandboxHost/README.md.
+  sandboxhost:
+    build:
+      context: .
+      dockerfile: src/PersonalAI.SandboxHost/Dockerfile
+    container_name: personalai-sandboxhost
+    # Lets the broker reach an API started with `dotnet run` on the host (set SANDBOX_BROKER_API_URL to
+    # ws://host.docker.internal:5080/api/sandbox/host and start only this service with --no-deps).
+    # Docker Desktop provides this name already; the mapping makes it work on Linux Engine too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - Broker__ApiUrl=${SANDBOX_BROKER_API_URL:-ws://api:8080/api/sandbox/host}
+      - Broker__HostKey=${SANDBOX_HOST_KEY:-}
+      - Broker__HostId=${SANDBOX_HOST_ID:-docker-compose}
+      # Always equal to both sides of the volume mount below -- see the bind-mount warning.
+      - Broker__SandboxRootPath=${SANDBOX_HOST_PATH:-/data/sandbox}
+      - Broker__DockerEndpoint=unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # WARNING: both sides of this mount MUST be the identical path. HostConfig.Binds -- used when the
+      # broker creates a sandbox container -- is resolved by the Docker DAEMON using the HOST's own view
+      # of the path, not this container's. If the broker's internal path (Broker__SandboxRootPath above)
+      # differs from the actual path on the Docker host, every sandbox container it creates will silently
+      # bind-mount an empty directory instead of this one. So SANDBOX_HOST_PATH drives both sides of the
+      # mount and Broker__SandboxRootPath. It must be an absolute path the Docker daemon can bind (on
+      # macOS, a directory under a Docker Desktop shared folder, e.g. /Users/<you>/personalai-sandbox).
+      # See src/PersonalAI.SandboxHost/README.md for the full explanation.
+      - ${SANDBOX_HOST_PATH:-/data/sandbox}:${SANDBOX_HOST_PATH:-/data/sandbox}
+    depends_on:
+      - api
+    restart: unless-stopped

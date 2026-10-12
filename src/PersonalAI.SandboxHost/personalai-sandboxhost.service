@@ -1,0 +1,45 @@
+# Example systemd unit for running the broker directly on the Docker host, bare-metal (no
+# docker-compose) — the alternative deployment mode described in README.md.
+#
+# Install:
+#   sudo dotnet publish src/PersonalAI.SandboxHost/PersonalAI.SandboxHost.csproj -c Release \
+#       -o /opt/personalai-sandboxhost
+#   sudo cp src/PersonalAI.SandboxHost/personalai-sandboxhost.service /etc/systemd/system/
+#   sudo install -d -m 700 /etc/personalai-sandboxhost
+#   echo 'Broker__HostKey=<the key>' | sudo tee /etc/personalai-sandboxhost/broker.env >/dev/null
+#   sudo chmod 600 /etc/personalai-sandboxhost/broker.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now personalai-sandboxhost
+#
+# The host key is a secret, so it's kept out of this file. It comes from broker.env, which only root
+# can read. Set Broker__ApiUrl below to your API's public WebSocket URL.
+#
+# The broker needs read/write access to /var/run/docker.sock (typically via membership of the "docker"
+# group) and to Broker__SandboxRootPath (read/write/delete, including files containers wrote as root —
+# see README.md's "root-owned files" note). Running as root (the default below) is the simplest way to
+# guarantee both; swap User=root for a dedicated user in the "docker" group if your distro's socket
+# permissions allow it and you don't need to delete root-owned sandbox files.
+[Unit]
+Description=PersonalAI Sandbox Host broker
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/personalai-sandboxhost
+ExecStart=/usr/bin/dotnet /opt/personalai-sandboxhost/PersonalAI.SandboxHost.dll
+Restart=always
+RestartSec=5
+User=root
+
+# %H expands to the machine's hostname, a reasonable default HostId with zero configuration.
+Environment=Broker__ApiUrl=wss://api.example.com/api/sandbox/host
+Environment=Broker__HostId=%H
+Environment=Broker__SandboxRootPath=/data/sandbox
+Environment=Broker__DockerEndpoint=unix:///var/run/docker.sock
+# Broker__HostKey=... lives here (see header).
+EnvironmentFile=/etc/personalai-sandboxhost/broker.env
+
+[Install]
+WantedBy=multi-user.target

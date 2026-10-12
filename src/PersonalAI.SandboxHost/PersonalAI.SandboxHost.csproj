@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <!-- Deliberately does NOT reference PersonalAI.Core: Core drags in EF Core Sqlite, FlaUI.UIA3 and
+       System.Drawing.Common, none of which belong on a slim Linux Docker host. This project talks to
+       the API purely over the shared PersonalAI.Sandbox.Protocol wire types. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>dotnet-PersonalAI.SandboxHost</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Docker.DotNet.Enhanced" Version="4.3.3" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PersonalAI.Sandbox.Protocol\PersonalAI.Sandbox.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

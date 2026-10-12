@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PersonalAI.Core/PersonalAI.Core.csproj" />
+    <Project Path="src/PersonalAI.Api/PersonalAI.Api.csproj" />
+    <Project Path="src/PersonalAI.Sandbox.Protocol/PersonalAI.Sandbox.Protocol.csproj" />
+    <Project Path="src/PersonalAI.SandboxHost/PersonalAI.SandboxHost.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PersonalAI.Tests/PersonalAI.Tests.csproj" />
+  </Folder>
+</Solution>
