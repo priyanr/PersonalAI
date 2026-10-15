@@ -180,8 +180,14 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
     protected virtual string NormalizeBaseUrl(string baseUrl) => baseUrl;
 
     /// <summary>Attaches credentials to an outgoing request. Default is OpenAI-style bearer auth.</summary>
-    protected virtual void ApplyAuth(HttpRequestMessage request, string apiKey) =>
+    protected virtual void ApplyAuth(HttpRequestMessage request, string apiKey)
+    {
+        apiKey = apiKey.Trim();
+        if (apiKey.Any(c => c > 126 || c < 33))
+            throw new InvalidOperationException(
+                $"The {DisplayName} API key contains non-ASCII or whitespace characters (often a masked/placeholder value or a bad paste). Re-enter the key under Settings → Providers.");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+    }
 
     public async IAsyncEnumerable<AiChatChunk> ChatStreamAsync(
         string model,

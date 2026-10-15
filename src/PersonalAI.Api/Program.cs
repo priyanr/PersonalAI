@@ -76,6 +76,7 @@ builder.Services.AddHttpClient<OllamaProvider>((sp, client) =>
 builder.Services.AddHttpClient<OpenAiProvider>();
 builder.Services.AddHttpClient<DeepSeekProvider>();
 builder.Services.AddHttpClient<AzureAiProvider>();
+builder.Services.AddHttpClient<OpenRouterProvider>();
 // AddHttpClient<T> above only wires its configured HttpClient (e.g. Ollama's RequestTimeoutSeconds)
 // into whatever resolves T by its own concrete type. Registering IAIProvider -> T directly here would
 // be a SEPARATE, unrelated DI registration: plain constructor-injection DI, which — finding no
@@ -86,6 +87,7 @@ builder.Services.AddScoped<IAIProvider>(sp => sp.GetRequiredService<OllamaProvid
 builder.Services.AddScoped<IAIProvider>(sp => sp.GetRequiredService<OpenAiProvider>());
 builder.Services.AddScoped<IAIProvider>(sp => sp.GetRequiredService<DeepSeekProvider>());
 builder.Services.AddScoped<IAIProvider>(sp => sp.GetRequiredService<AzureAiProvider>());
+builder.Services.AddScoped<IAIProvider>(sp => sp.GetRequiredService<OpenRouterProvider>());
 builder.Services.AddScoped<AIProviderRegistry>();
 builder.Services.AddSingleton<AIProviderConfigCache>();
 builder.Services.AddScoped<IAIProviderConfigRepository, AIProviderConfigRepository>();
