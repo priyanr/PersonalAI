@@ -24,4 +24,16 @@ public sealed class OpenRouterProvider(HttpClient httpClient, AIProviderConfigCa
 
     // OpenRouter normalizes every upstream model to the classic /chat/completions shape.
     protected override bool SupportsResponsesApi => false;
+
+    // As with DeepSeek, only an explicit "off" is sent; otherwise the model keeps its own default. Models whose
+    // reasoning is mandatory ignore it.
+    private protected override void ApplyThinking(OpenAiChatRequestWire requestBody, bool? think)
+    {
+        if (think == false)
+            requestBody.Reasoning = new OpenRouterReasoningWire { Enabled = false };
+    }
+
+    public override bool SupportsThinkingToggle => true;
+
+    public override IReadOnlyList<ProviderConfigField> ModelSettingFields => ModelSettings.OpenAiCompatibleWithThinkingFields;
 }

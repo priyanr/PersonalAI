@@ -85,6 +85,17 @@ internal sealed class OpenAiChatRequestWire
     [JsonPropertyName("thinking")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public OpenAiThinkingWire? Thinking { get; set; }
+
+    /// <summary>OpenRouter's unified reasoning switch ({"enabled":false}). Null = omit.</summary>
+    [JsonPropertyName("reasoning")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OpenRouterReasoningWire? Reasoning { get; set; }
+}
+
+internal sealed class OpenRouterReasoningWire
+{
+    [JsonPropertyName("enabled")]
+    public bool Enabled { get; set; }
 }
 
 internal sealed class OpenAiThinkingWire

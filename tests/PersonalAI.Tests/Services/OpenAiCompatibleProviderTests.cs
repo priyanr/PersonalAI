@@ -289,6 +289,25 @@ public class OpenAiCompatibleProviderTests
             handler.LastRequestBody.Should().NotContain("\"thinking\"");
     }
 
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(null, false)]
+    public async Task OpenRouter_SendsReasoningDisabledOnlyWhenThinkingIsExplicitlyOff(bool? think, bool expectDisabled)
+    {
+        var handler = new FakeHttpMessageHandler(StopSse);
+        var cache = new AIProviderConfigCache();
+        cache.SetProvider("openrouter", new Dictionary<string, string?> { ["ApiKey"] = "sk" });
+        var provider = new OpenRouterProvider(new HttpClient(handler), cache, Options.Create(new AgentSettings()));
+
+        await foreach (var _ in provider.ChatStreamAsync("inclusionai/ling-3.1-flash", [], [], null, think, null, CancellationToken.None)) { }
+
+        if (expectDisabled)
+            handler.LastRequestBody.Should().Contain("\"reasoning\":{\"enabled\":false}");
+        else
+            handler.LastRequestBody.Should().NotContain("\"reasoning\"");
+    }
+
     [Fact]
     public async Task OpenAi_NeverSendsDeepSeekThinkingParameter()
     {
