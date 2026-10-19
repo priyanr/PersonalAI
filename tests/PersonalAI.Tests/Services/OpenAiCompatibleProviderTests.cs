@@ -335,6 +335,55 @@ public class OpenAiCompatibleProviderTests
     }
 
     [Fact]
+    public async Task ChatStreamAsync_MidStreamErrorChunk_ThrowsInsteadOfReturningThePartialToolCall()
+    {
+        var sse =
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"sandbox","arguments":"{\"code\":\"<html"}}]}}]}""" + "\n\n" +
+            """data: {"error":{"code":502,"message":"Upstream provider disconnected"},"choices":[{"delta":{"content":""},"finish_reason":"error"}]}""" + "\n\n" +
+            "data: [DONE]\n\n";
+
+        var provider = CreateProvider(sse, out _);
+        var act = async () =>
+        {
+            await foreach (var _ in provider.ChatStreamAsync("gpt-4o-mini", [], [], null, null, null, CancellationToken.None)) { }
+        };
+
+        (await act.Should().ThrowAsync<HttpRequestException>()).Which.Message.Should().Contain("Upstream provider disconnected");
+    }
+
+    [Fact]
+    public async Task ChatStreamAsync_StreamEndingMidToolCall_Throws()
+    {
+        var sse = """data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"sandbox","arguments":"{\"code\":\"<html"}}]}}]}""" + "\n\n";
+
+        var provider = CreateProvider(sse, out _);
+        var act = async () =>
+        {
+            await foreach (var _ in provider.ChatStreamAsync("gpt-4o-mini", [], [], null, null, null, CancellationToken.None)) { }
+        };
+
+        await act.Should().ThrowAsync<HttpRequestException>();
+    }
+
+    [Fact]
+    public async Task ChatStreamAsync_MalformedToolCallArgumentsInHistory_AreSentAsEmptyObject()
+    {
+        var provider = CreateProvider(StopSse, out var handler);
+        AiChatMessage[] messages =
+        [
+            new("user", "go"),
+            new("assistant", "", [new AiToolCall("c1", "sandbox", "{\"code\":\"<html")]),
+            new("tool", "Tool arguments were not valid JSON", null, "c1"),
+            new("user", "try again")
+        ];
+
+        await foreach (var _ in provider.ChatStreamAsync("gpt-4o-mini", messages, [], null, null, null, CancellationToken.None)) { }
+
+        handler.LastRequestBody.Should().Contain("\"arguments\":\"{}\"");
+        handler.LastRequestBody.Should().NotContain("<html");
+    }
+
+    [Fact]
     public async Task DeepSeek_SendsAssistantReasoningContentBack()
     {
         var handler = new FakeHttpMessageHandler(StopSse);

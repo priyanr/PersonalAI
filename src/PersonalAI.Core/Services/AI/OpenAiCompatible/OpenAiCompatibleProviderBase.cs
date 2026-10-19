@@ -261,6 +261,7 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
         var accumulators = new Dictionary<int, ToolCallAccumulator>();
         AiTokenUsage? usage = null;
         var hitOutputLimit = false;
+        var finished = false;
 
         string? line;
         while ((line = await reader.ReadLineAsync(ct)) is not null)
@@ -268,7 +269,11 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
             if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
 
             var payload = line["data:".Length..].Trim();
-            if (payload == "[DONE]") break;
+            if (payload == "[DONE]")
+            {
+                finished = true;
+                break;
+            }
             if (payload.Length == 0) continue;
 
             OpenAiChatChunkWire? chunk;
@@ -281,6 +286,11 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
                 continue;
             }
 
+            // The upstream model failed after the 200 was sent. Ignoring it would hand the loop whatever was
+            // streamed so far — typically a tool call cut off mid-arguments, or an empty reply.
+            if (chunk?.Error is not null || chunk?.Choices?.FirstOrDefault()?.FinishReason == "error")
+                throw new HttpRequestException($"The model failed mid-response: {chunk?.Error?.Message ?? "unknown error"}");
+
             // With include_usage the usage arrives on its own chunk (empty choices) after the finish_reason
             // chunk, so read on to [DONE] rather than stopping at finish_reason.
             if (chunk?.Usage is { } u)
@@ -289,6 +299,8 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
             var choice = chunk?.Choices?.FirstOrDefault();
             if (choice is null) continue;
 
+            if (choice.FinishReason is not null)
+                finished = true;
             if (choice.FinishReason == "length")
                 hitOutputLimit = true;
 
@@ -315,6 +327,10 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
                 }
             }
         }
+
+        // A connection dropped mid-call leaves partial arguments that would run as a malformed call.
+        if (accumulators.Count > 0 && !finished)
+            throw new HttpRequestException("The model's response stream ended before its tool call was complete. Try again.");
 
         if (accumulators.Count > 0)
         {
@@ -467,7 +483,7 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
             yield return new OpenAiResponsesInputItemWire { Role = m.Role, Content = m.Content ?? "" };
 
         foreach (var tc in m.ToolCalls ?? [])
-            yield return new OpenAiResponsesInputItemWire { Type = "function_call", CallId = tc.ToolCallId, Name = tc.Name, Arguments = tc.ArgumentsJson };
+            yield return new OpenAiResponsesInputItemWire { Type = "function_call", CallId = tc.ToolCallId, Name = tc.Name, Arguments = tc.WireArgumentsJson };
     }
 
     private static OpenAiResponsesToolWire ToResponsesTool(AiToolDefinition t) => new()
@@ -504,7 +520,7 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
             ? [.. m.ToolCalls.Select(tc => new OpenAiToolCallWire
             {
                 Id = tc.ToolCallId,
-                Function = new OpenAiFunctionCallWire { Name = tc.Name, Arguments = tc.ArgumentsJson }
+                Function = new OpenAiFunctionCallWire { Name = tc.Name, Arguments = tc.WireArgumentsJson }
             })]
             : null
     };

@@ -1,3 +1,6 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace PersonalAI.Core.Models.DTOs;
 
 /// <summary>A single chat message as sent to / reconstructed from a provider's chat completion API.
@@ -9,7 +12,28 @@ public record AiChatMessage(string Role, string? Content, IReadOnlyList<AiToolCa
 
 /// <summary>A tool call requested by the model. ToolCallId is synthesized locally for providers
 /// (like Ollama) that don't guarantee a stable per-call id the way OpenAI's wire format does.</summary>
-public record AiToolCall(string ToolCallId, string Name, string ArgumentsJson);
+public record AiToolCall(string ToolCallId, string Name, string ArgumentsJson)
+{
+    /// <summary>ArgumentsJson when it is a JSON object, else "{}". A malformed call stays in history (its tool
+    /// result explains the failure), but replaying the broken JSON makes many backends fail the whole request
+    /// or render a broken chat template — so every later reply in the session comes back empty.</summary>
+    [JsonIgnore]
+    public string WireArgumentsJson
+    {
+        get
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(ArgumentsJson);
+                return doc.RootElement.ValueKind == JsonValueKind.Object ? ArgumentsJson : "{}";
+            }
+            catch (JsonException)
+            {
+                return "{}";
+            }
+        }
+    }
+}
 
 /// <summary>One decoded chunk of a streaming chat completion. Usage is only set on the final chunk, and only
 /// when the provider reported it. ReasoningDelta carries the model's thinking tokens (DeepSeek's

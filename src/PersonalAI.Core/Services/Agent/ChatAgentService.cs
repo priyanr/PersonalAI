@@ -448,7 +448,8 @@ public sealed class ChatAgentService(
                 }
                 catch (JsonException ex)
                 {
-                    argParseError = $"Tool arguments were not valid JSON: {ex.Message}. Re-emit the tool call with valid JSON arguments.";
+                    argParseError = $"Tool arguments were not valid JSON: {ex.Message}. Re-emit the tool call with valid JSON arguments, " +
+                                    "escaping quotes and newlines inside strings. If you were sending a large file, write it in several smaller pieces.";
                 }
 
                 if (argParseError is not null)

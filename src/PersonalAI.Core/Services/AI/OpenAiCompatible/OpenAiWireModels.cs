@@ -128,6 +128,16 @@ internal sealed class OpenAiChatChunkWire
 
     [JsonPropertyName("usage")]
     public OpenAiUsageWire? Usage { get; set; }
+
+    /// <summary>An upstream failure reported mid-stream (OpenRouter does this, with finish_reason "error").</summary>
+    [JsonPropertyName("error")]
+    public OpenAiStreamErrorWire? Error { get; set; }
+}
+
+internal sealed class OpenAiStreamErrorWire
+{
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
 }
 
 internal sealed class OpenAiUsageWire

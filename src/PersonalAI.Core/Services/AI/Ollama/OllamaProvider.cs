@@ -190,7 +190,7 @@ public sealed class OllamaProvider(HttpClient httpClient, AIProviderConfigCache 
                 Function = new OllamaFunctionCallWire
                 {
                     Name = tc.Name,
-                    Arguments = JsonDocument.Parse(tc.ArgumentsJson).RootElement.Clone()
+                    Arguments = JsonDocument.Parse(tc.WireArgumentsJson).RootElement.Clone()
                 }
             })]
             : null

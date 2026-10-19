@@ -1,4 +1,5 @@
 using FluentAssertions;
+using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Settings;
 using PersonalAI.Core.Services.AI;
 using PersonalAI.Core.Services.AI.Ollama;
@@ -228,5 +229,22 @@ public class OllamaProviderTests
         await foreach (var _ in provider.ChatStreamAsync("gpt-oss:20b", [], [], null, true, "high", CancellationToken.None)) { }
 
         handler.LastRequestBody.Should().Contain("\"think\":false");
+    }
+
+    [Fact]
+    public async Task ChatStreamAsync_TruncatedToolCallInHistory_IsSentAsEmptyObjectInsteadOfThrowing()
+    {
+        var ndjson = """{"message":{"role":"assistant","content":"hi"},"done":true}""" + "\n";
+        AiChatMessage[] messages =
+        [
+            new("user", "go"),
+            new("assistant", "", [new AiToolCall("c1", "write_file", "")]),
+            new("tool", "cut off", null, "c1")
+        ];
+
+        var provider = CreateProvider(ndjson, out var handler);
+        await foreach (var _ in provider.ChatStreamAsync("llama3.1:8b", messages, [], null, false, null, CancellationToken.None)) { }
+
+        handler.LastRequestBody.Should().Contain("\"arguments\":{}");
     }
 }
