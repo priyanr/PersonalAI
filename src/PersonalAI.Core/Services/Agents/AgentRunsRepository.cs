@@ -28,7 +28,7 @@ public class AgentRunsRepository(AppDbContext db) : IAgentRunsRepository
         return runs.OrderByDescending(r => r.StartedAt).Take(limit).ToList();
     }
 
-    public async Task CompleteAsync(Guid runId, AgentRunStatus status, string? summary, string transcriptJson, CancellationToken ct)
+    public async Task CompleteAsync(Guid runId, AgentRunStatus status, string? summary, string transcriptJson, CancellationToken ct, DateTimeOffset? completedAt = null)
     {
         var run = await db.AgentRuns.FindAsync([runId], ct);
         if (run is null) return;
@@ -36,8 +36,20 @@ public class AgentRunsRepository(AppDbContext db) : IAgentRunsRepository
         run.Status = status;
         run.Summary = summary;
         run.TranscriptJson = transcriptJson;
-        run.CompletedAt = DateTimeOffset.UtcNow;
+        run.CompletedAt = completedAt ?? DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<bool> ReopenAsync(Guid runId, string transcriptJson, CancellationToken ct)
+    {
+        var run = await db.AgentRuns.FindAsync([runId], ct);
+        if (run is null || run.Status == AgentRunStatus.Running) return false;
+
+        run.Status = AgentRunStatus.Running;
+        run.CompletedAt = null;
+        run.TranscriptJson = transcriptJson;
+        await db.SaveChangesAsync(ct);
+        return true;
     }
 
     public async Task AppendTranscriptAsync(Guid runId, string transcriptJson, CancellationToken ct)

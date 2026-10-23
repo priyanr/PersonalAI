@@ -13,7 +13,12 @@ public interface IAgentRunsRepository
     /// <summary>Most recent runs for an agent, newest first.</summary>
     Task<IReadOnlyList<AgentRun>> GetForAgentAsync(Guid agentId, int limit, CancellationToken ct);
 
-    Task CompleteAsync(Guid runId, AgentRunStatus status, string? summary, string transcriptJson, CancellationToken ct);
+    /// <param name="completedAt">Completion time to record; now when omitted (a follow-up restores the original).</param>
+    Task CompleteAsync(Guid runId, AgentRunStatus status, string? summary, string transcriptJson, CancellationToken ct, DateTimeOffset? completedAt = null);
+
+    /// <summary>Puts a finished run back to Running with the given transcript (a follow-up message was added). False when
+    /// the run does not exist or is already running, so two follow-ups cannot interleave.</summary>
+    Task<bool> ReopenAsync(Guid runId, string transcriptJson, CancellationToken ct);
 
     /// <summary>Persists transcript progress mid-run (status/summary/completion untouched), so a viewer
     /// polling GetAsync sees the run stream in rather than only appearing once it finishes.</summary>

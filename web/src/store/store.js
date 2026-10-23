@@ -8,6 +8,7 @@ import skillsReducer from "./skillsSlice";
 import agentsReducer from "./agentsSlice";
 import authReducer from "./authSlice";
 import toolsReducer from "./toolsSlice";
+import sshServersReducer from "./sshServersSlice";
 
 export function makeStore() {
   return configureStore({
@@ -20,7 +21,8 @@ export function makeStore() {
       skills: skillsReducer,
       agents: agentsReducer,
       auth: authReducer,
-      tools: toolsReducer
+      tools: toolsReducer,
+      sshServers: sshServersReducer
     }
   });
 }

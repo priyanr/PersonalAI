@@ -21,7 +21,7 @@ public class SkillsController(ISkillsRepository repo, ISkillExecutionService exe
 
     [HttpGet("available-tools")]
     public ActionResult<IReadOnlyList<AvailableToolDto>> GetAvailableTools() =>
-        Ok(tools.Definitions.Select(d => new AvailableToolDto(d.Name, d.Description)).ToList());
+        Ok(tools.ChatDefinitions.Select(d => new AvailableToolDto(d.Name, d.Description)).ToList());
 
     [HttpPost]
     public async Task<ActionResult<SkillDto>> Create(CreateSkillRequest request, CancellationToken ct)

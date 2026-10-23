@@ -34,6 +34,7 @@ public class AgentExecutionServiceTests
         tools ?? new ToolRegistry([]),
         Options.Create(agentSettings ?? new AgentSettings { MaxIterations = 25 }),
         sandboxHostClient ?? Mock.Of<ISandboxHostClient>(),
+        TestAgentTypes.Registry,
         Mock.Of<ILogger<AgentExecutionService>>());
 
     [Fact]
@@ -389,6 +390,131 @@ public class AgentExecutionServiceTests
         fetched!.LastRunAt.Should().NotBeNull();
         fetched.NextRunAt.Should().NotBeNull();
         fetched.NextRunAt.Should().NotBe(originalNextRunAt); // re-armed from the run's completion time
+    }
+
+    [Fact]
+    public async Task ContinueAsync_SendsTranscriptAsHistory_AppendsReplyAndLeavesScheduleAlone()
+    {
+        await using var db = NewContext();
+        var agentsRepo = new AgentsRepository(db);
+        var agent = await agentsRepo.CreateAsync(
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Interval, null, 30, null, true, CancellationToken.None);
+
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)], [new AiChatChunk("added it", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+        var scheduleAfterRun = (await agentsRepo.GetAsync(agent.Id, CancellationToken.None))!.NextRunAt;
+
+        var events = new List<AgentStreamEvent>();
+        await foreach (var e in service.ContinueAsync(agent.Id, runId, "please add the disk widget", CancellationToken.None))
+            events.Add(e);
+
+        events.Should().ContainSingle(e => e is DoneEvent);
+        var sent = provider.RecordedRequests[1];
+        // The recorded list is the live one, so it also holds the reply appended after the call.
+        sent.Select(m => (m.Role, m.Content)).Should().Equal(
+            ("system", sent[0].Content), ("user", "Run this agent."), ("assistant", "first answer"),
+            ("user", "please add the disk widget"), ("assistant", "added it"));
+        sent[0].Content.Should().Contain("[Follow-up]");
+
+        var run = await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(AgentRunStatus.Succeeded);
+        var transcript = JsonSerializer.Deserialize<List<AgentRunTranscriptEntry>>(run.TranscriptJson)!;
+        transcript.Select(t => (t.Kind, t.Content)).Should().Equal(
+            ("text", "first answer"), ("user", "please add the disk widget"), ("text", "added it"));
+
+        (await agentsRepo.GetAsync(agent.Id, CancellationToken.None))!.NextRunAt.Should().Be(scheduleAfterRun);
+    }
+
+    [Fact]
+    public async Task ContinueAsync_KeepsTheRunsOriginalStatusSummaryAndCompletionTime_EvenWhenTheFollowUpFails()
+    {
+        await using var db = NewContext();
+        var agent = await new AgentsRepository(db).CreateAsync(
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)]) { };
+        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+        var original = (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!;
+        var (status, summary, completedAt) = (original.Status, original.Summary, original.CompletedAt);
+
+        provider.ThrowOnNextCall = new InvalidOperationException("the model is down");
+        var events = new List<AgentStreamEvent>();
+        await foreach (var e in service.ContinueAsync(agent.Id, runId, "please add a widget", CancellationToken.None)) events.Add(e);
+
+        events.Should().ContainSingle(e => e is ErrorEvent);
+        var run = (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!;
+        run.Status.Should().Be(status).And.Be(AgentRunStatus.Succeeded);
+        run.Summary.Should().Be(summary);
+        run.CompletedAt.Should().Be(completedAt);
+        var transcript = JsonSerializer.Deserialize<List<AgentRunTranscriptEntry>>(run.TranscriptJson)!;
+        transcript.Select(t => t.Kind).Should().Equal("text", "user", "text");
+        transcript[^1].IsError.Should().BeTrue();
+        transcript[^1].Content.Should().Contain("the model is down");
+    }
+
+    [Fact]
+    public async Task ContinueAsync_ASuccessfulFollowUp_LeavesTheOriginalSummaryInPlace()
+    {
+        await using var db = NewContext();
+        var agent = await new AgentsRepository(db).CreateAsync(
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)], [new AiChatChunk("added it", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+
+        await foreach (var _ in service.ContinueAsync(agent.Id, runId, "more", CancellationToken.None)) { }
+
+        (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!.Summary.Should().Be("first answer");
+    }
+
+    [Fact]
+    public async Task ContinueAsync_TwoAtOnce_OnlyOneRuns()
+    {
+        await using var db = NewContext();
+        var agent = await new AgentsRepository(db).CreateAsync(
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first", null, true)], [new AiChatChunk("second", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+
+        await using var first = service.ContinueAsync(agent.Id, runId, "one", CancellationToken.None).GetAsyncEnumerator();
+        (await first.MoveNextAsync()).Should().BeTrue(); // started: the run is claimed
+
+        var second = async () => { await foreach (var _ in service.ContinueAsync(agent.Id, runId, "two", CancellationToken.None)) { } };
+        await second.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still in progress*");
+        while (await first.MoveNextAsync()) { }
+
+        // released afterwards
+        await foreach (var _ in service.ContinueAsync(agent.Id, runId, "three", CancellationToken.None)) { }
+    }
+
+    [Fact]
+    public async Task ContinueAsync_RunStillRunning_IsRefused()
+    {
+        await using var db = NewContext();
+        var agent = await new AgentsRepository(db).CreateAsync(
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var run = await new AgentRunsRepository(db).CreateAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None);
+        var service = CreateService(db, new FakeAIProvider(), new FakeSkillExecutionService((_, _) => []));
+
+        var act = async () => { await foreach (var _ in service.ContinueAsync(agent.Id, run.Id, "hi", CancellationToken.None)) { } };
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still in progress*");
     }
 
     private sealed class FlakyAIProvider(int failures) : IAIProvider

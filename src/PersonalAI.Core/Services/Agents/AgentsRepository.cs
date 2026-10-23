@@ -34,10 +34,12 @@ public class AgentsRepository(AppDbContext db) : IAgentsRepository
         string name, string? description, string prompt, string providerKey, string modelName, int? numCtx,
         IReadOnlyList<Guid> enabledSkillIds, IReadOnlyList<string> enabledTools, int? maxLlmCalls, AgentScheduleKind scheduleKind,
         DateTimeOffset? scheduleOnceAt, int? intervalMinutes, string? cronExpression, bool enabled, CancellationToken ct,
-        string? reasoningEffort = null)
+        string? reasoningEffort = null, AgentType type = AgentType.General, string typeConfigJson = "{}")
     {
         var agent = new AgentEntity
         {
+            Type = type,
+            TypeConfigJson = typeConfigJson,
             Name = name,
             Description = description,
             Prompt = prompt,
@@ -65,11 +67,13 @@ public class AgentsRepository(AppDbContext db) : IAgentsRepository
         Guid id, string name, string? description, string prompt, string providerKey, string modelName, int? numCtx,
         IReadOnlyList<Guid> enabledSkillIds, IReadOnlyList<string> enabledTools, int? maxLlmCalls, AgentScheduleKind scheduleKind,
         DateTimeOffset? scheduleOnceAt, int? intervalMinutes, string? cronExpression, bool enabled, CancellationToken ct,
-        string? reasoningEffort = null)
+        string? reasoningEffort = null, AgentType type = AgentType.General, string typeConfigJson = "{}")
     {
         var agent = await db.Agents.FindAsync([id], ct);
         if (agent is null) return null;
 
+        agent.Type = type;
+        agent.TypeConfigJson = typeConfigJson;
         agent.Name = name;
         agent.Description = description;
         agent.Prompt = prompt;

@@ -16,14 +16,14 @@ public interface IAgentsRepository
         string name, string? description, string prompt, string providerKey, string modelName, int? numCtx,
         IReadOnlyList<Guid> enabledSkillIds, IReadOnlyList<string> enabledTools, int? maxLlmCalls, AgentScheduleKind scheduleKind,
         DateTimeOffset? scheduleOnceAt, int? intervalMinutes, string? cronExpression, bool enabled, CancellationToken ct,
-        string? reasoningEffort = null);
+        string? reasoningEffort = null, AgentType type = AgentType.General, string typeConfigJson = "{}");
 
     /// <summary>Returns null if no agent has that id.</summary>
     Task<Agent?> UpdateAsync(
         Guid id, string name, string? description, string prompt, string providerKey, string modelName, int? numCtx,
         IReadOnlyList<Guid> enabledSkillIds, IReadOnlyList<string> enabledTools, int? maxLlmCalls, AgentScheduleKind scheduleKind,
         DateTimeOffset? scheduleOnceAt, int? intervalMinutes, string? cronExpression, bool enabled, CancellationToken ct,
-        string? reasoningEffort = null);
+        string? reasoningEffort = null, AgentType type = AgentType.General, string typeConfigJson = "{}");
 
     /// <summary>Returns false if no agent has that id.</summary>
     Task<bool> DeleteAsync(Guid id, CancellationToken ct);

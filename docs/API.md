@@ -71,14 +71,16 @@ All endpoints require bearer token auth (except `/auth/*` and `/api/sandbox/host
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/api/agents/types` | List agent types (`General`, `DashboardAlerts`) with display name and description |
 | `GET` | `/api/agents` | List agents |
-| `POST` | `/api/agents` | Create an agent |
+| `POST` | `/api/agents` | Create an agent (`type` + type-specific `typeConfig`, validated per type; see [Dashboard Agents](DASHBOARD_AGENTS.md)) |
 | `GET` | `/api/agents/{id}` | Get an agent |
 | `PATCH` | `/api/agents/{id}` | Update an agent |
 | `DELETE` | `/api/agents/{id}` | Delete an agent |
 | `POST` | `/api/agents/{id}/run` | Trigger a manual run → **SSE stream** (includes `run-started`, `llm-call`, `token-usage`) |
 | `GET` | `/api/agents/{id}/runs` | List an agent's run history (each with `llmCallCount`, `totalInputTokens`, `totalOutputTokens`) |
 | `GET` | `/api/agents/{id}/runs/{runId}` | Full transcript for one run, plus the same counters |
+| `POST` | `/api/agents/{id}/runs/{runId}/messages` | Chat on a finished run. Body `{ "message": "..." }`; streams the agent's reply as SSE. The run's transcript is the conversation so far, the agent keeps its tools (so it can add a widget or a job), and the exchange is appended to the same run without touching the schedule. 400 for an empty message, 404 for an unknown run, 409 while the run is still running |
 
 ## Tools
 
@@ -121,3 +123,59 @@ All endpoints require bearer token auth (except `/auth/*` and `/api/sandbox/host
 ---
 
 See [Concepts: SSE Streaming Protocol](CONCEPTS.md#sse-streaming-protocol) for the event types emitted by streaming endpoints.
+
+## SSH servers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` / `POST` | `/api/ssh/server-groups` | List / create server groups (list includes `serverCount`) |
+| `PATCH` / `DELETE` | `/api/ssh/server-groups/{id}` | Rename / delete a group (delete also removes its servers) |
+| `GET` / `POST` | `/api/ssh/servers` | List (optional `?groupId=`) / create SSH servers; `secretRef` must name an existing secret |
+| `GET` / `PATCH` / `DELETE` | `/api/ssh/servers/{id}` | Get / update / delete a server |
+| `POST` | `/api/ssh/servers/{id}/test-connection` | Runs a probe over SSH → `{ success, serverInfo, error, hostKeyFingerprint }`; pins the host key on first success |
+| `POST` | `/api/ssh/servers/{id}/reset-host-key` | Clears the pinned host key |
+
+## Agent data (Dashboard & Alerts agents)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agents/{id}/datasets` | Datasets with kind, field description, point count, last update |
+| `GET` | `/api/agents/{id}/datasets/{name}/points` | Points oldest-first; query `entity`, `sinceMinutes`, `latest=true`, `limit` |
+| `POST` | `/api/agents/{id}/collect-now` | Run every active collection job now → `{ jobsRun, results: [{ job, target, success, rows, error }] }`; 409 if a pass is already running |
+
+## Dashboards (Dashboard & Alerts agents)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agents/{id}/dashboard` | The current spec, its version and reason (`?version=` for an old one); 204 if the agent has no dashboard yet |
+| `GET` | `/api/agents/{id}/dashboard/data` | Live data for every widget, keyed by widget id (`?version=` to render an old version) |
+| `GET` | `/api/agents/{id}/dashboard/versions` | Saved versions, newest first |
+| `POST` | `/api/agents/{id}/dashboard/versions/{n}/restore` | Saves version n as a new current version |
+
+## Alerts (Dashboard & Alerts agents)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` / `POST` | `/api/agents/{id}/alert-rules` | List / create alert rules (`name, dataset, field, operator, threshold, forMinutes, severity, target, filter, enabled`); validated against collected data |
+| `PATCH` / `DELETE` | `/api/agents/{id}/alert-rules/{ruleId}` | Update / delete a rule (disabling resolves its open alerts; deleting removes its history) |
+| `GET` | `/api/alerts` | Alerts across agents: `?state=active` (default, firing), `resolved` (last 7 days) or `all`; `?agentId=` to narrow. Each alert has `acknowledged` and `acknowledgedAt` |
+| `GET` | `/api/alerts/summary` | `{ firing, critical, warning, unacknowledged, unacknowledgedCritical, acknowledged }`; the nav badge shows `unacknowledged` (what still needs attention) |
+| `POST` | `/api/alerts/{id}/acknowledge` | Mark an alert as seen. It stays listed while it fires and resolves on its own when the condition clears; if it comes back it is a new, unacknowledged alert |
+| `POST` | `/api/alerts/{id}/unacknowledge` | Take an acknowledgement back |
+| `POST` | `/api/alerts/acknowledge-all` | Acknowledge every unacknowledged firing alert (`?agentId=` to narrow) → `{ acknowledged }` |
+
+## Collection jobs (Dashboard & Alerts agents)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agents/{id}/jobs` | List the agent's jobs: `tool`, `request`, parser, dataset, interval, `status` (`pending_approval`, `active`, `disabled`), `source` (`user`, `llm`), `outsideAllowlist` (the command is not on the tool's allowed list and runs only because it was approved as written), `approvalToken`, last run |
+| `POST` | `/api/agents/{id}/jobs/{jobId}/approve` | Approve a pending job; body `{ "token": <job.approvalToken> }` (400 without it; 409 if the job changed since review, isn't pending, or its request is no longer allowed) |
+| `POST` | `/api/agents/{id}/jobs/{jobId}/enable`, `.../disable` | Resume / pause an approved job (409 for a pending one: approve or delete it) |
+| `POST` | `/api/agents/{id}/jobs/{jobId}/run` | Run one active job now |
+| `DELETE` | `/api/agents/{id}/jobs/{jobId}` | Delete a job (collected data is kept) |
+
+## Data sources
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/data-sources` | The data tools an agent can be scoped to, each with its scope items (a group of connections, or a single connection) and the connection names inside. Drives the Data sources picker; an agent's selection is stored as `typeConfig.toolScopes` (`{ "<tool>": [scope item ids] }`) |

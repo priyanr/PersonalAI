@@ -61,6 +61,14 @@ export default function ToolSettingsForm({ tool }) {
                   checked={Boolean(values[field.name])}
                   onChange={(e) => handleChange(field.name, e.target.checked)}
                 />
+              ) : field.type === "TextArea" ? (
+                <textarea
+                  rows={8}
+                  className="tool-textarea"
+                  value={values[field.name] ?? ""}
+                  placeholder={field.placeholder ?? ""}
+                  onChange={(e) => handleChange(field.name, e.target.value)}
+                />
               ) : (
                 <input
                   type={inputTypeFor(field.type)}

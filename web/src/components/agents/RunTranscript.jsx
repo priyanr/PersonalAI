@@ -10,12 +10,13 @@ export default function RunTranscript({ entries }) {
       {entries.map((entry, i) => (
         <div
           key={i}
-          className={`run-transcript-entry${entry.kind === "skill" || entry.kind === "tool" ? " is-skill" : ""}${entry.isError ? " is-error" : ""}`}
+          className={`run-transcript-entry${entry.kind === "skill" || entry.kind === "tool" ? " is-skill" : ""}${entry.kind === "user" ? " is-user" : ""}${entry.isError ? " is-error" : ""}`}
         >
           <span className="run-transcript-entry-label">
             {entry.kind === "skill" && `Skill: ${entry.skillName}`}
             {entry.kind === "tool" && `Tool: ${entry.skillName}`}
-            {entry.kind !== "skill" && entry.kind !== "tool" && "Agent"}
+            {entry.kind === "user" && "You"}
+            {entry.kind !== "skill" && entry.kind !== "tool" && entry.kind !== "user" && "Agent"}
             {entry.isError && " (error)"}
           </span>
           {entry.content}

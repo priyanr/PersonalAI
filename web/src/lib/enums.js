@@ -65,6 +65,21 @@ export const SKILL_TOOL_OPTIONS = [
   { name: "sandbox", label: "Sandbox (run commands and edit files in a container)" }
 ];
 
+// Mirrors PersonalAI.Core/Models/Entities/Enums/AgentType.cs.
+export const AgentType = { General: 0, DashboardAlerts: 1 };
+
+export const AGENT_TYPE_OPTIONS = [
+  { value: AgentType.General, label: "General", description: "Runs its prompt on a schedule, invoking its skills and tools." },
+  {
+    value: AgentType.DashboardAlerts,
+    label: "Dashboard & Alerts",
+    description: "Runs collection jobs (designed by the model, approved by you) on the data sources you scope it to; the model designs the dashboard and alert rules."
+  }
+];
+
+// Mirrors DashboardAlertsConfig bounds (PersonalAI.Core/Services/Agents/Types).
+export const DASHBOARD_COLLECT_INTERVAL_RANGE = { min: 1, max: 5 };
+
 // Mirrors PersonalAI.Core/Models/Entities/Enums/AgentScheduleKind.cs.
 export const AgentScheduleKind = { Manual: 0, Once: 1, Interval: 2, Cron: 3 };
 

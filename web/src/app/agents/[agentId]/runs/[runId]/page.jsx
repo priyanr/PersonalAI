@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { apiGet } from "@/lib/api";
 import RunTranscript from "@/components/agents/RunTranscript";
+import RunChat from "@/components/agents/RunChat";
 import { AGENT_RUN_STATUS_LABELS, AGENT_RUN_TRIGGER_LABELS, AgentRunStatus } from "@/lib/enums";
 import { formatTokens, tokenBreakdown } from "@/lib/format";
 import { useSandboxStatus } from "@/hooks/useSandboxStatus";
@@ -23,6 +24,9 @@ export default function AgentRunDetailPage() {
   const [error, setError] = useState(null);
   const { canBrowse: canBrowseSandbox, refresh: refreshSandboxStatus } = useSandboxStatus(runId);
   const [sandboxBrowserOpen, setSandboxBrowserOpen] = useState(false);
+  // Bumped to restart polling when a follow-up reopens the run.
+  const [pollKey, setPollKey] = useState(0);
+  const restartPolling = () => setPollKey((k) => k + 1);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +56,7 @@ export default function AgentRunDetailPage() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [agentId, runId, refreshSandboxStatus]);
+  }, [agentId, runId, refreshSandboxStatus, pollKey]);
 
   return (
     <main>
@@ -89,6 +93,13 @@ export default function AgentRunDetailPage() {
           </p>
           {run.summary && <p>{run.summary}</p>}
           <RunTranscript entries={run.transcript} />
+          <RunChat
+            agentId={agentId}
+            runId={runId}
+            disabled={run.status === AgentRunStatus.Running}
+            onStarted={restartPolling}
+            onFinished={restartPolling}
+          />
         </>
       )}
 

@@ -1,0 +1,705 @@
+/* ------------------------------------------------------------------
+   Dashboard widgets. Chart colours come from the validated categorical
+   palette (dataviz skill), stepped separately for the dark surface and
+   checked against this app's --panel surface in both modes. Status
+   colours are fixed and reserved for state: never a series colour, and
+   always paired with an icon + word.
+   ------------------------------------------------------------------ */
+
+.dash {
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #6250d6;
+  --series-8: #e34948;
+  --status-ok: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --viz-grid: color-mix(in srgb, var(--rule) 70%, transparent);
+  --viz-axis: var(--rule-strong);
+  --viz-track: var(--sunk);
+}
+
+@media (prefers-color-scheme: dark) {
+  .dash {
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+  }
+}
+
+.dash-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.5rem;
+}
+
+.dash-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  margin: 0.9rem 0 1.1rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.dash-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  transition: opacity 0.15s;
+}
+
+.dash-grid.is-loading {
+  opacity: 0.6;
+}
+
+.dash-widget {
+  grid-column: span 1;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem 1rem;
+  min-width: 0;
+}
+
+.dash-widget.span-2 {
+  grid-column: span 2;
+}
+
+.dash-widget.span-3 {
+  grid-column: span 3;
+}
+
+@media (max-width: 900px) {
+  .dash-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dash-widget.span-3 {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 600px) {
+  .dash-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .dash-widget,
+  .dash-widget.span-2,
+  .dash-widget.span-3 {
+    grid-column: span 1;
+  }
+}
+
+.dash-widget-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.dash-widget-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.dash-link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.dash-link-button:hover:not(:disabled) {
+  background: none;
+  color: var(--accent-hover);
+}
+
+.dash-empty {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.25rem 0;
+}
+
+.dash-widget-error {
+  color: var(--error);
+  font-size: 0.88rem;
+  margin: 0.25rem 0;
+}
+
+/* status chip: icon + word, colour only reinforces */
+.dash-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--ink);
+}
+
+.dash-status-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #0b0b0b;
+  background: var(--status-none, var(--rule-strong));
+}
+
+.status-ok {
+  --status-color: var(--status-ok);
+}
+.status-warning {
+  --status-color: var(--status-warning);
+}
+.status-critical {
+  --status-color: var(--status-critical);
+}
+.status-none {
+  --status-color: var(--rule-strong);
+}
+
+.status-ok .dash-status-icon,
+.status-warning .dash-status-icon,
+.status-critical .dash-status-icon {
+  background: var(--status-color);
+}
+
+.status-critical .dash-status-icon {
+  color: #fff;
+}
+
+/* stat */
+.dash-stat-value {
+  font-size: 2.1rem;
+  font-weight: 600;
+  line-height: 1.1;
+}
+
+.dash-stat-unit {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--muted);
+  margin-left: 0.15rem;
+}
+
+.dash-stat-detail {
+  color: var(--muted);
+  font-size: 0.82rem;
+  margin-top: 0.25rem;
+}
+
+/* meter (gauge) */
+.dash-meter-track {
+  height: 0.75rem;
+  background: var(--viz-track);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0.55rem 0 0.25rem;
+}
+
+.dash-meter-fill {
+  height: 100%;
+  background: var(--meter-color, var(--accent));
+  border-radius: 999px;
+}
+
+.dash-meter-fill.status-warning {
+  --meter-color: var(--status-warning);
+}
+.dash-meter-fill.status-critical {
+  --meter-color: var(--status-critical);
+}
+.dash-meter-fill.status-ok {
+  --meter-color: var(--status-ok);
+}
+
+.dash-meter-scale {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* bar */
+.dash-bars {
+  display: grid;
+  gap: 0.7rem;
+}
+
+/* label and value share a line; the bar gets the full width below, so it stays readable in a narrow widget */
+.dash-bar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.2rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.dash-bar-track {
+  grid-column: 1 / -1;
+}
+
+.dash-bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dash-bar-track {
+  height: 0.7rem;
+}
+
+.dash-bar-fill {
+  height: 100%;
+  background: var(--series-1);
+  /* rounded at the data end, square at the baseline */
+  border-radius: 0 4px 4px 0;
+  min-width: 2px;
+}
+
+.dash-bar-fill.status-warning {
+  background: var(--status-warning);
+}
+.dash-bar-fill.status-critical {
+  background: var(--status-critical);
+}
+
+.dash-bar-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-variant-numeric: tabular-nums;
+  justify-content: flex-end;
+}
+
+/* status grid */
+.dash-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+  gap: 0.6rem;
+}
+
+.dash-tile {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--status-color);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.65rem;
+  min-width: 0;
+}
+
+.dash-tile-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.85rem;
+}
+
+.dash-tile-state {
+  margin-top: 0.25rem;
+}
+
+/* tables */
+.dash-table-wrap {
+  overflow-x: auto;
+}
+
+.dash-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.dash-table th,
+.dash-table td {
+  text-align: left;
+  padding: 0.35rem 0.6rem 0.35rem 0;
+  border-bottom: 1px solid var(--viz-grid);
+  white-space: nowrap;
+}
+
+.dash-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.78rem;
+}
+
+.dash-table td.num,
+.dash-table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* time series */
+.dash-chart {
+  position: relative;
+}
+
+.dash-chart svg {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.dash-chart text {
+  fill: var(--muted);
+  font-size: 11px;
+  font-family: var(--font-body);
+}
+
+.dash-chart .tick-label-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-chart .end-label {
+  fill: var(--ink);
+  font-weight: 600;
+}
+
+.dash-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--ink);
+}
+
+.dash-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dash-legend-key {
+  width: 14px;
+  height: 0;
+  border-top: 2px solid var(--key-color);
+  border-radius: 1px;
+}
+
+.dash-tooltip {
+  position: absolute;
+  top: 0;
+  z-index: 3;
+  pointer-events: none;
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  padding: 0.4rem 0.6rem;
+  font-size: 0.78rem;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.18);
+  min-width: 8rem;
+  max-width: 16rem;
+}
+
+.dash-tooltip-time {
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+.dash-tooltip-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.dash-tooltip-row strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-tooltip-row .name {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* markdown */
+.dash-markdown p {
+  margin: 0.35rem 0;
+}
+
+.dash-markdown h3,
+.dash-markdown h4 {
+  margin: 0.6rem 0 0.2rem;
+  font-size: 1rem;
+}
+
+.dash-markdown ul {
+  margin: 0.3rem 0;
+  padding-left: 1.2rem;
+}
+
+.dash-hidden-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  margin: 0.4rem 0 0;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---------- alerts ---------- */
+
+.alert-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.alert-row {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.8rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--status-color);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.8rem;
+}
+
+.alert-row.is-acked {
+  opacity: 0.75;
+}
+
+.alert-message {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.alert-meta {
+  font-size: 0.8rem;
+}
+
+@media (max-width: 700px) {
+  .alert-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.alert-strip {
+  margin: 0 0 1rem;
+}
+
+.alert-strip h3 {
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+  letter-spacing: 0;
+}
+
+.settings-tabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.5rem 0;
+  margin-bottom: -1px;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-tabs button:hover:not(:disabled) {
+  background: none;
+  color: var(--ink);
+}
+
+.settings-tabs button.active {
+  color: var(--ink);
+  font-weight: 700;
+  border-bottom-color: var(--accent);
+}
+
+.nav-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  margin-left: 0.5rem;
+  border-radius: 999px;
+  background: var(--attn);
+  color: #0b0b0b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.nav-badge.is-critical {
+  background: var(--error);
+  color: #fff;
+}
+
+/* ---------- alert rules editor ---------- */
+
+.rule-table td,
+.rule-table th {
+  white-space: normal;
+}
+
+.rule-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.4rem 0 0.8rem;
+}
+
+/* ---------- SSH tool settings ---------- */
+
+.tool-textarea {
+  width: 100%;
+  font-family: var(--font-code);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.ssh-servers {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+}
+
+/* ---------- collection jobs ---------- */
+
+.job-card {
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--status-color, var(--rule-strong));
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 0.7rem 0.9rem;
+  margin: 0.6rem 0;
+}
+
+.job-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem 1rem;
+}
+
+.job-card pre {
+  margin: 0.5rem 0;
+  padding: 0.55rem 0.7rem;
+  background: var(--sunk);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.job-meta {
+  font-size: 0.82rem;
+}
+
+/* ---------- data source scope picker ---------- */
+
+.data-source {
+  margin: 0.6rem 0 0.9rem;
+}
+
+.data-source-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.3rem 1rem;
+  margin-bottom: 0.25rem;
+}
+
+/* ---------- acknowledged vs unacknowledged alerts ---------- */
+
+.alert-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* An acknowledged alert is still firing but has been seen: quieter, with a dashed edge instead of the solid status bar. */
+.alert-row.is-acked {
+  opacity: 0.8;
+  background: transparent;
+  border-left-style: dashed;
+}
+
+.ack-note {
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.tab-count {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.alert-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 0.6rem;
+}
+
+.alert-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin: 0 0 0.5rem;
+}
+
+.alert-strip-head h3 {
+  margin: 0;
+}
+
+.alert-strip-acked {
+  margin-top: 0.6rem;
+}
+
+.alert-strip-acked > summary {
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}

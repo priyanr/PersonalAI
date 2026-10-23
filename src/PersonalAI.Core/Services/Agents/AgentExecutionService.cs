@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities.Enums;
+using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Models.Settings;
 using PersonalAI.Core.Services.Agent;
 using PersonalAI.Core.Services.AI;
@@ -32,9 +33,117 @@ public sealed class AgentExecutionService(
     ToolRegistry tools,
     IOptions<AgentSettings> agentSettings,
     ISandboxHostClient sandboxHostClient,
-    ILogger<AgentExecutionService> logger) : IAgentExecutionService
+    AgentTypeRegistry agentTypes,
+    ILogger<AgentExecutionService> logger,
+    Monitoring.Collectors.DataSourceRegistry? dataSources = null) : IAgentExecutionService
 {
+    /// <summary>What a run (or a follow-up on a finished run) needs that does not depend on the run itself.</summary>
+    private sealed record RunContext(
+        PersonalAI.Core.Models.Entities.Agent Agent,
+        Dictionary<string, Guid> ToolNameToSkillId,
+        List<AiToolDefinition> ToolDefinitions,
+        HashSet<string> EnabledDirectTools,
+        int SkillAndToolCount,
+        IAIProvider Provider);
+
+    /// <summary>How a finished run looked before a follow-up reopened it. A follow-up is a conversation on that run, not a new
+    /// execution, so when it ends the run goes back to this status, summary and completion time; what the follow-up did (or
+    /// how it failed) is in the transcript.</summary>
+    private sealed record FollowUpOrigin(AgentRunStatus Status, string? Summary, DateTimeOffset? CompletedAt);
+
+    // One follow-up at a time per run, even across simultaneous requests (a status check alone is a read-then-write race).
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, byte> ActiveFollowUps = new();
+
+    private const int DigestEntryLimit = 1200;
+
+    private const string FollowUpNote =
+        "\n\n[Follow-up] The run in the conversation above has finished and the user is now talking to you in the same run. " +
+        "Do what they ask, using your tools when it needs them (for example to add something the dashboard is missing, " +
+        "or a collection job); otherwise just answer. Reply with plain text when done.";
+
     public async IAsyncEnumerable<AgentStreamEvent> RunAsync(Guid agentId, AgentRunTrigger trigger, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var context = await PrepareAsync(agentId, ct);
+        var run = await runsRepo.CreateAsync(agentId, trigger, ct);
+        var messages = new List<AiChatMessage> { new("system", ""), new("user", "Run this agent.") };
+
+        await foreach (var evt in LoopAsync(context, run.Id, messages, [], followUp: null, ct))
+            yield return evt;
+    }
+
+    /// <summary>Continues a finished run with a message from the user: the same agent, tools and sandbox owner, with the
+    /// run's transcript as the conversation so far. The reply is appended to the run's transcript; the agent's schedule
+    /// is left alone.</summary>
+    public async IAsyncEnumerable<AgentStreamEvent> ContinueAsync(Guid agentId, Guid runId, string message, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var run = await runsRepo.GetAsync(runId, ct);
+        if (run is null || run.AgentId != agentId) throw new InvalidOperationException($"Run {runId} not found.");
+        if (string.IsNullOrWhiteSpace(message)) throw new InvalidOperationException("A message is required.");
+
+        if (!ActiveFollowUps.TryAdd(runId, 0)) throw new InvalidOperationException("This run is still in progress.");
+        try
+        {
+            var context = await PrepareAsync(agentId, ct);
+            var transcript = JsonSerializer.Deserialize<List<AgentRunTranscriptEntry>>(run.TranscriptJson) ?? [];
+            transcript.Add(new AgentRunTranscriptEntry("user", null, message.Trim(), false));
+
+            var origin = new FollowUpOrigin(run.Status, run.Summary, run.CompletedAt);
+            if (!await runsRepo.ReopenAsync(runId, JsonSerializer.Serialize(transcript), ct))
+                throw new InvalidOperationException("This run is still in progress.");
+
+            var messages = new List<AiChatMessage> { new("system", ""), new("user", "Run this agent.") };
+            messages.AddRange(RebuildHistory(transcript));
+
+            await foreach (var evt in LoopAsync(context, runId, messages, transcript, origin, ct))
+                yield return evt;
+        }
+        finally
+        {
+            ActiveFollowUps.TryRemove(runId, out _);
+        }
+    }
+
+    /// <summary>The transcript as chat messages. Tool calls were not stored with their provider call ids, so tool
+    /// activity is folded into a short assistant digest instead of tool messages providers would reject as orphans.
+    /// Adjacent messages of one role are merged.</summary>
+    private static List<AiChatMessage> RebuildHistory(List<AgentRunTranscriptEntry> transcript)
+    {
+        var result = new List<AiChatMessage>();
+        void Add(string role, string content)
+        {
+            if (result.Count > 0 && result[^1].Role == role)
+                result[^1] = result[^1] with { Content = result[^1].Content + "\n\n" + content };
+            else
+                result.Add(new AiChatMessage(role, content));
+        }
+
+        var digest = new StringBuilder();
+        void FlushDigest()
+        {
+            if (digest.Length == 0) return;
+            Add("assistant", "[Tool activity earlier in this run]\n" + digest.ToString().TrimEnd());
+            digest.Clear();
+        }
+
+        foreach (var entry in transcript)
+        {
+            if (entry.Kind is "tool" or "skill")
+            {
+                var content = entry.Content ?? "";
+                if (content.Length > DigestEntryLimit) content = content[..DigestEntryLimit] + " ...(truncated)";
+                digest.Append("- ").Append(entry.SkillName).Append(entry.IsError ? " (failed): " : ": ").AppendLine(content);
+                continue;
+            }
+
+            FlushDigest();
+            if (!string.IsNullOrWhiteSpace(entry.Content))
+                Add(entry.Kind == "user" ? "user" : "assistant", entry.Content);
+        }
+        FlushDigest();
+        return result;
+    }
+
+    private async Task<RunContext> PrepareAsync(Guid agentId, CancellationToken ct)
     {
         var agent = await agentsRepo.GetAsync(agentId, ct)
             ?? throw new InvalidOperationException($"Agent {agentId} not found.");
@@ -58,25 +167,34 @@ public sealed class AgentExecutionService(
         // "skill_"-prefixed names above, so both can share one dispatch table by tool call name.
         var enabledDirectTools = new HashSet<string>(
             JsonSerializer.Deserialize<List<string>>(agent.EnabledToolsJson) ?? [], StringComparer.OrdinalIgnoreCase);
+        // The tools a type grants: its required ones, plus (for Dashboard & Alerts) one per data source in the agent's
+        // scope. A scope key only counts if it names a registered data source: it is user-editable JSON, and must never
+        // be a way to switch on an unrelated tool (computer_control, sandbox, gmail, write_file...).
+        var descriptor = agentTypes.Get(agent.Type);
+        var required = descriptor.RequiredTools.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in descriptor.ToolsFor(agent.TypeConfigJson))
+            if (required.Contains(name) || dataSources?.Find(name) is not null) enabledDirectTools.Add(name);
         toolDefinitions.AddRange(tools.Definitions.Where(d => enabledDirectTools.Contains(d.Name)));
 
-        var provider = providers.Resolve(agent.ProviderKey);
-        var run = await runsRepo.CreateAsync(agentId, trigger, ct);
+        return new RunContext(agent, toolNameToSkillId, toolDefinitions, enabledDirectTools,
+            enabledSkills.Count + enabledDirectTools.Count, providers.Resolve(agent.ProviderKey));
+    }
+
+    private async IAsyncEnumerable<AgentStreamEvent> LoopAsync(
+        RunContext context, Guid runId, List<AiChatMessage> messages, List<AgentRunTranscriptEntry> transcript, FollowUpOrigin? followUp,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        var (agent, toolNameToSkillId, toolDefinitions, enabledDirectTools, skillAndToolCount, provider) = context;
+        var agentId = agent.Id;
 
         // Everything from here on runs against this run's own ephemeral sandbox (SandboxOwnerKind.AgentRun,
-        // run.Id) — torn down in the finally below regardless of how the run ends (success, failure,
-        // cancellation). Nothing before this point could have created a sandbox, since run.Id didn't exist yet.
+        // runId) — torn down in the finally below regardless of how the run ends (success, failure,
+        // cancellation). Nothing before this point could have created a sandbox, since runId didn't exist yet.
         try
         {
-            yield return new AgentRunStartedEvent(run.Id);
+            yield return new AgentRunStartedEvent(runId);
 
-            var transcript = new List<AgentRunTranscriptEntry>();
-            var basePrompt = BuildSystemPrompt(agent.Prompt, enabledSkills.Count + enabledDirectTools.Count);
-            var messages = new List<AiChatMessage>
-            {
-                new("system", basePrompt),
-                new("user", "Run this agent.")
-            };
+            var basePrompt = BuildSystemPrompt(agent, skillAndToolCount) + (followUp is not null ? FollowUpNote : "");
             var maxIterations = agent.MaxLlmCalls ?? agentSettings.Value.MaxIterations;
             var failedCalls = new Dictionary<(string Name, string Args), string>();
 
@@ -102,7 +220,7 @@ public sealed class AgentExecutionService(
 
                 // Retry a transient network failure, only if nothing from the failed attempt was consumed
                 // yet (otherwise a retry would duplicate streamed text or tool calls).
-                yield return new LlmCallEvent(await runsRepo.IncrementLlmCallsAsync(run.Id, ct));
+                yield return new LlmCallEvent(await runsRepo.IncrementLlmCallsAsync(runId, ct));
                 var maxRetries = agentSettings.Value.ProviderRetryCount;
                 for (var attempt = 0; attempt <= maxRetries; attempt++)
                 {
@@ -122,7 +240,7 @@ public sealed class AgentExecutionService(
                             }
                             catch (OperationCanceledException)
                             {
-                                await FinalizeAsync(run.Id, agentId, AgentRunStatus.Failed, "Run was cancelled.", transcript, CancellationToken.None);
+                                await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, "Run was cancelled.", transcript, CancellationToken.None);
                                 throw;
                             }
                             catch (Exception ex)
@@ -161,13 +279,13 @@ public sealed class AgentExecutionService(
 
                 if (usage is not null)
                 {
-                    var (inputTokens, outputTokens) = await runsRepo.AddTokenUsageAsync(run.Id, usage, ct);
+                    var (inputTokens, outputTokens) = await runsRepo.AddTokenUsageAsync(runId, usage, ct);
                     yield return new TokenUsageEvent(inputTokens, outputTokens);
                 }
 
                 if (providerError is not null)
                 {
-                    await FinalizeAsync(run.Id, agentId, AgentRunStatus.Failed, providerError, transcript, CancellationToken.None);
+                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, providerError, transcript, CancellationToken.None);
                     yield return new ErrorEvent(providerError);
                     yield break;
                 }
@@ -178,7 +296,7 @@ public sealed class AgentExecutionService(
                     // Not a successful run with a blank summary — see ModelReplyDiagnostics.
                     var emptyNotice = ModelReplyDiagnostics.EmptyReplyNotice(
                         agent.ProviderKey, hitOutputLimit, reasoningBuilder.Length > 0, usage, canDisableThinking: false);
-                    await FinalizeAsync(run.Id, agentId, AgentRunStatus.Failed, emptyNotice, transcript, CancellationToken.None);
+                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, emptyNotice, transcript, CancellationToken.None);
                     yield return new ErrorEvent(emptyNotice);
                     yield break;
                 }
@@ -188,7 +306,7 @@ public sealed class AgentExecutionService(
                 if (!string.IsNullOrWhiteSpace(assistantContent))
                 {
                     transcript.Add(new AgentRunTranscriptEntry("text", null, assistantContent, false));
-                    await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                    await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                 }
 
                 if (toolCalls is null || toolCalls.Count == 0)
@@ -197,12 +315,12 @@ public sealed class AgentExecutionService(
                     {
                         // The partial answer is already in the transcript; the run didn't finish it.
                         var cutOffNotice = ModelReplyDiagnostics.CutOffAnswerNotice(agent.ProviderKey, canDisableThinking: false);
-                        await FinalizeAsync(run.Id, agentId, AgentRunStatus.Failed, cutOffNotice, transcript, CancellationToken.None);
+                        await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, cutOffNotice, transcript, CancellationToken.None);
                         yield return new ErrorEvent(cutOffNotice);
                         yield break;
                     }
 
-                    await FinalizeAsync(run.Id, agentId, AgentRunStatus.Succeeded, assistantContent, transcript, ct);
+                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Succeeded, assistantContent, transcript, ct);
                     yield return new DoneEvent();
                     yield break;
                 }
@@ -215,7 +333,7 @@ public sealed class AgentExecutionService(
                     {
                         messages.Add(new AiChatMessage("tool", truncatedError, null, call.ToolCallId));
                         transcript.Add(new AgentRunTranscriptEntry("tool", call.Name, truncatedError, true));
-                        await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                         yield return new ToolResultEvent(Guid.NewGuid(), call.Name, truncatedError, true);
                         continue;
                     }
@@ -226,7 +344,7 @@ public sealed class AgentExecutionService(
                         var msg = $"You already made this exact call and it failed with: {previousError} Do not repeat it.";
                         messages.Add(new AiChatMessage("tool", msg, null, call.ToolCallId));
                         transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, msg, true));
-                        await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                         yield return new ToolResultEvent(Guid.NewGuid(), call.Name, msg, true);
                         continue;
                     }
@@ -236,7 +354,7 @@ public sealed class AgentExecutionService(
                         if (enabledDirectTools.Contains(call.Name) && tools.TryGet(call.Name, out var directTool))
                         {
                             var channel = System.Threading.Channels.Channel.CreateUnbounded<AgentStreamEvent>();
-                            var executionTask = ExecuteDirectToolAsync(directTool, call.ArgumentsJson, run.Id, msg => channel.Writer.TryWrite(new ToolProgressEvent(Guid.Empty, call.Name, msg)), ct);
+                            var executionTask = ExecuteDirectToolAsync(directTool, call.ArgumentsJson, runId, agentId, msg => channel.Writer.TryWrite(new ToolProgressEvent(Guid.Empty, call.Name, msg)), ct);
                             while (true)
                             {
                                 var finished = await Task.WhenAny(executionTask, channel.Reader.WaitToReadAsync(ct).AsTask());
@@ -249,7 +367,7 @@ public sealed class AgentExecutionService(
                             var (directResult, directFailed) = await executionTask;
                             messages.Add(new AiChatMessage("tool", directResult, null, call.ToolCallId));
                             transcript.Add(new AgentRunTranscriptEntry("tool", call.Name, directResult, directFailed));
-                            await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                            await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                             if (directFailed) failedCalls[key] = FirstLine(directResult);
                             else failedCalls.Clear(); // state changed — a previously failed call may now succeed
                             yield return new ToolResultEvent(Guid.Empty, call.Name, directResult, directFailed);
@@ -260,7 +378,7 @@ public sealed class AgentExecutionService(
                         failedCalls[key] = errMsg;
                         messages.Add(new AiChatMessage("tool", errMsg, null, call.ToolCallId));
                         transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, errMsg, true));
-                        await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                         yield return new ToolResultEvent(Guid.NewGuid(), call.Name, errMsg, true);
                         continue;
                     }
@@ -300,7 +418,7 @@ public sealed class AgentExecutionService(
                         : skillFailed ? "Skill run failed." : "Skill produced no output.";
                     messages.Add(new AiChatMessage("tool", resultContent, null, call.ToolCallId));
                     transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, resultContent, skillFailed));
-                    await runsRepo.AppendTranscriptAsync(run.Id, JsonSerializer.Serialize(transcript), ct);
+                    await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
                     if (skillFailed) failedCalls[key] = FirstLine(resultContent);
                     else failedCalls.Clear(); // state changed — a previously failed call may now succeed
                     yield return new ToolResultEvent(Guid.NewGuid(), call.Name, resultContent, skillFailed);
@@ -308,34 +426,44 @@ public sealed class AgentExecutionService(
             }
 
             var capMessage = $"Stopped after {maxIterations} tool iterations without a final answer.";
-            await FinalizeAsync(run.Id, agentId, AgentRunStatus.Failed, capMessage, transcript, ct);
+            await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, capMessage, transcript, ct);
             yield return new ErrorEvent(capMessage);
         }
         finally
         {
             // Skipping entirely when no host is connected avoids exception noise on every run in
             // deployments that never enable the sandbox feature — if it were never connected, no
-            // sandbox could have been created for this run.Id either.
+            // sandbox could have been created for this runId either.
             if (sandboxHostClient.IsConnected)
             {
                 try
                 {
-                    await sandboxHostClient.DestroySandboxAsync(run.Id, deleteFiles: true, CancellationToken.None);
+                    await sandboxHostClient.DestroySandboxAsync(runId, deleteFiles: true, CancellationToken.None);
                 }
                 catch (Exception ex)
                 {
                     // A failed teardown must never mask the run's real outcome — this is a best-effort
                     // safety net; the reaper's EphemeralGraceMinutes sweep is the backstop if it fails.
-                    logger.LogWarning(ex, "Failed to tear down ephemeral sandbox for agent run {RunId}.", run.Id);
+                    logger.LogWarning(ex, "Failed to tear down ephemeral sandbox for agent run {RunId}.", runId);
                 }
             }
         }
     }
 
     private async Task FinalizeAsync(
-        Guid runId, Guid agentId, AgentRunStatus status, string? summary,
+        Guid runId, Guid agentId, FollowUpOrigin? followUp, AgentRunStatus status, string? summary,
         List<AgentRunTranscriptEntry> transcript, CancellationToken ct)
     {
+        if (followUp is not null)
+        {
+            // A follow-up is a conversation on a past run, not a scheduled execution: it must not move the schedule or turn a
+            // run that succeeded into a failed one. A failure is recorded in the transcript instead.
+            if (status == AgentRunStatus.Failed)
+                transcript.Add(new AgentRunTranscriptEntry("text", null, summary, true));
+            await runsRepo.CompleteAsync(runId, followUp.Status, followUp.Summary, JsonSerializer.Serialize(transcript), ct, followUp.CompletedAt);
+            return;
+        }
+
         await runsRepo.CompleteAsync(runId, status, summary, JsonSerializer.Serialize(transcript), ct);
 
         var now = DateTimeOffset.UtcNow;
@@ -344,16 +472,20 @@ public sealed class AgentExecutionService(
         await agentsRepo.SetRunOutcomeAsync(agentId, now, nextRunAt, ct);
     }
 
-    private static string BuildSystemPrompt(string prompt, int enabledSkillAndToolCount) =>
-        enabledSkillAndToolCount == 0
+    private string BuildSystemPrompt(PersonalAI.Core.Models.Entities.Agent agent, int enabledSkillAndToolCount)
+    {
+        var preamble = agentTypes.Get(agent.Type).SystemPromptPreamble;
+        var prompt = preamble is null ? agent.Prompt : $"{preamble}\n\n{agent.Prompt}";
+        return enabledSkillAndToolCount == 0
             ? prompt + "\n\n[Skills/Tools] No skills or tools are enabled for this agent — respond directly, you have nothing to invoke."
             : prompt;
+    }
 
     /// <summary>Executes a directly-enabled Tool the same restricted way SkillExecutionService does: no
     /// secret substitution (direct tools don't have a secret allowlist — wrap them in a Skill if they need
     /// one), and a ToolApprovalRequired result is rejected outright since there's no user to approve it
     /// during unattended execution.</summary>
-    private static async Task<(string Content, bool IsError)> ExecuteDirectToolAsync(ITool tool, string argumentsJson, Guid runId, Action<string>? onProgress, CancellationToken ct)
+    private static async Task<(string Content, bool IsError)> ExecuteDirectToolAsync(ITool tool, string argumentsJson, Guid runId, Guid agentId, Action<string>? onProgress, CancellationToken ct)
     {
         JsonElement arguments;
         try
@@ -370,7 +502,7 @@ public sealed class AgentExecutionService(
         try
         {
             result = await tool.ExecuteAsync(arguments,
-                new ToolExecutionContext(PreApproved: false, Sandbox: new SandboxOwner(SandboxOwnerKind.AgentRun, runId), OnProgress: onProgress), ct);
+                new ToolExecutionContext(PreApproved: false, Sandbox: new SandboxOwner(SandboxOwnerKind.AgentRun, runId), OnProgress: onProgress, AgentId: agentId), ct);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)

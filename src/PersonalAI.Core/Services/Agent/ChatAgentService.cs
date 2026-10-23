@@ -238,7 +238,7 @@ public sealed class ChatAgentService(
             var hitOutputLimit = false;
             var disabledToolNames = DisabledToolNames(session);
             var toolDefinitions = session.ToolsEnabled
-                ? tools.Definitions.Where(d => !disabledToolNames.Contains(d.Name)).Concat(skillToolDefinitions).ToList()
+                ? tools.ChatDefinitions.Where(d => !disabledToolNames.Contains(d.Name)).Concat(skillToolDefinitions).ToList()
                 : [];
             var think = session.ThinkingEnabled ?? appSettings.ThinkingEnabled;
             var provider = providers.Resolve(session.ProviderKey);

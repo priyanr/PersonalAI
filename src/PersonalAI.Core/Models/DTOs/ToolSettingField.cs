@@ -7,6 +7,8 @@ public enum ToolSettingFieldType
     Url,
     Number,
     Boolean,
+    /// <summary>Multi-line text (e.g. one entry per line).</summary>
+    TextArea,
     Custom
 }
 

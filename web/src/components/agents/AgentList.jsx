@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { AGENT_SCHEDULE_KIND_OPTIONS, AgentScheduleKind } from "@/lib/enums";
+import { AGENT_SCHEDULE_KIND_OPTIONS, AgentScheduleKind, AgentType } from "@/lib/enums";
 import { formatNextRun } from "@/lib/schedule";
 
 function scheduleLabel(agent) {
@@ -23,6 +23,7 @@ export default function AgentList({ agents }) {
             <span className="skill-name">{agent.name}</span>
             {agent.description && <span className="skill-description">{agent.description}</span>}
             <span className="skill-meta">
+              {agent.type === AgentType.DashboardAlerts && "Dashboard & Alerts · "}
               {agent.providerKey} · {agent.modelName} · {scheduleLabel(agent)}
               {formatNextRun(agent) && ` · next run ${formatNextRun(agent)}`}
               {agent.enabledSkillIds.length > 0 && ` · ${agent.enabledSkillIds.length} skill(s)`}

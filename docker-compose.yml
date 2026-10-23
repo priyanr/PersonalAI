@@ -31,6 +31,20 @@ services:
       retries: 3
       start_period: 10s
 
+  # The API image runs as a non-root user (UID 1654, the .NET image default), but Docker creates bind-mounted
+  # host folders as root on Linux, so the API could not write its SQLite db or workspace. This one-shot job
+  # hands those folders to the API's UID before it starts (the chown baked into the image is hidden by the
+  # bind mounts). It is idempotent and exits immediately.
+  api-init:
+    image: busybox:1.37
+    container_name: personalai-api-init
+    user: "0:0"
+    command: chown -R ${API_UID:-1654}:${API_UID:-1654} /data /workspace
+    volumes:
+      - ${SQLITE_DATA_PATH:-./data/sqlite}:/data
+      - ${WORKSPACE_DATA_PATH:-./data/workspace}:/workspace
+    restart: "no"
+
   api:
     build:
       context: .
@@ -71,6 +85,8 @@ services:
       - ${SQLITE_DATA_PATH:-./data/sqlite}:/data
       - ${WORKSPACE_DATA_PATH:-./data/workspace}:/workspace
     depends_on:
+      api-init:
+        condition: service_completed_successfully
       ollama:
         condition: service_healthy
       searxng:

@@ -13,7 +13,7 @@ public readonly record struct SandboxOwner(SandboxOwnerKind Kind, Guid Id);
 /// <summary>Sandbox is optional so every existing `new ToolExecutionContext(false)` construction across
 /// the codebase and test suite keeps compiling — only ChatAgentService/SkillExecutionService/
 /// AgentExecutionService populate it, since only they know which session/run they're serving.</summary>
-public readonly record struct ToolExecutionContext(bool PreApproved, SandboxOwner? Sandbox = null, Action<string>? OnProgress = null);
+public readonly record struct ToolExecutionContext(bool PreApproved, SandboxOwner? Sandbox = null, Action<string>? OnProgress = null, Guid? AgentId = null);
 
 public abstract record ToolExecutionResult;
 

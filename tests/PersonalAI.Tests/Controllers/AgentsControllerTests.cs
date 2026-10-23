@@ -8,6 +8,7 @@ using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Services.Agent;
 using PersonalAI.Core.Services.Agents;
+using PersonalAI.Tests.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -23,6 +24,12 @@ public class AgentsControllerTests
             await Task.Yield();
             yield return new DoneEvent();
         }
+
+        public async IAsyncEnumerable<AgentStreamEvent> ContinueAsync(Guid agentId, Guid runId, string message, [EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.Yield();
+            yield return new DoneEvent();
+        }
     }
 
     private static (AgentsController Controller, AppDbContext Db, AgentRunsRepository RunsRepo) CreateController()
@@ -30,7 +37,7 @@ public class AgentsControllerTests
         var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
         var repo = new AgentsRepository(db);
         var runsRepo = new AgentRunsRepository(db);
-        return (new AgentsController(repo, runsRepo, new FakeAgentExecutionService(), Mock.Of<ILogger<AgentsController>>()), db, runsRepo);
+        return (new AgentsController(repo, TestAgentTypes.Registry, runsRepo, new FakeAgentExecutionService(), Mock.Of<ILogger<AgentsController>>()), db, runsRepo);
     }
 
     private static CreateAgentRequest ValidCreateRequest(string name = "My agent") =>
@@ -240,5 +247,86 @@ public class AgentsControllerTests
         var result = await controller.Create(ValidCreateRequest() with { ReasoningEffort = "extreme" }, CancellationToken.None);
 
         result.Result.Should().BeOfType<BadRequestObjectResult>();
+    }
+
+    // ---- agent type must survive a PATCH that doesn't mention it ----
+
+    private static async Task<AgentDto> CreateDashboardAgentAsync(AgentsController controller)
+    {
+        var created = await controller.Create(
+            ValidCreateRequest("monitor") with
+            {
+                Type = AgentType.DashboardAlerts,
+                TypeConfig = System.Text.Json.JsonDocument.Parse("{\"collectIntervalMinutes\":2,\"retentionDays\":7}").RootElement
+            }, CancellationToken.None);
+        return (((CreatedAtActionResult)created.Result!).Value as AgentDto)!;
+    }
+
+    private static UpdateAgentRequest PatchWithoutType(string name) =>
+        new(name, null, "prompt", "ollama", "llama3.1:8b", null, [], [], null, AgentScheduleKind.Manual, null, null, null, true);
+
+    [Fact]
+    public async Task Update_WithoutTypeFields_KeepsTheAgentsTypeAndSettings()
+    {
+        var (controller, db, _) = CreateController();
+        await using var _1 = db;
+        var agent = await CreateDashboardAgentAsync(controller);
+
+        var result = await controller.Update(agent.Id, PatchWithoutType("renamed"), CancellationToken.None);
+
+        var dto = (result.Result as OkObjectResult)!.Value as AgentDto;
+        dto!.Name.Should().Be("renamed");
+        dto.Type.Should().Be(AgentType.DashboardAlerts);
+        dto.TypeConfig.GetProperty("collectIntervalMinutes").GetInt32().Should().Be(2);
+        dto.TypeConfig.GetProperty("retentionDays").GetInt32().Should().Be(7);
+    }
+
+    [Fact]
+    public async Task Update_SameTypeWithNewConfig_ReplacesTheSettings()
+    {
+        var (controller, db, _) = CreateController();
+        await using var _1 = db;
+        var agent = await CreateDashboardAgentAsync(controller);
+
+        var result = await controller.Update(agent.Id, PatchWithoutType("monitor") with
+        {
+            Type = AgentType.DashboardAlerts,
+            TypeConfig = System.Text.Json.JsonDocument.Parse("{\"collectIntervalMinutes\":4}").RootElement
+        }, CancellationToken.None);
+
+        var dto = (result.Result as OkObjectResult)!.Value as AgentDto;
+        dto!.TypeConfig.GetProperty("collectIntervalMinutes").GetInt32().Should().Be(4);
+    }
+
+    [Fact]
+    public async Task Update_ToAnotherTypeWithoutConfig_GetsThatTypesDefaults()
+    {
+        var (controller, db, _) = CreateController();
+        await using var _1 = db;
+        var agent = await CreateDashboardAgentAsync(controller);
+
+        var result = await controller.Update(agent.Id, PatchWithoutType("monitor") with { Type = AgentType.General }, CancellationToken.None);
+
+        var dto = (result.Result as OkObjectResult)!.Value as AgentDto;
+        dto!.Type.Should().Be(AgentType.General);
+        dto.TypeConfig.ToString().Should().Be("{}");
+    }
+
+    [Fact]
+    public async Task Update_InvalidTypeConfig_IsRejected_AndTheAgentIsUnchanged()
+    {
+        var (controller, db, _) = CreateController();
+        await using var _1 = db;
+        var agent = await CreateDashboardAgentAsync(controller);
+
+        var result = await controller.Update(agent.Id, PatchWithoutType("monitor") with
+        {
+            Type = AgentType.DashboardAlerts,
+            TypeConfig = System.Text.Json.JsonDocument.Parse("{\"collectIntervalMinutes\":99}").RootElement
+        }, CancellationToken.None);
+
+        result.Result.Should().BeOfType<BadRequestObjectResult>();
+        var after = (await controller.Get(agent.Id, CancellationToken.None)).Result as OkObjectResult;
+        (after!.Value as AgentDto)!.TypeConfig.GetProperty("collectIntervalMinutes").GetInt32().Should().Be(2);
     }
 }

@@ -22,6 +22,11 @@ public interface ITool
     /// since /api/tools only surfaces IsConnected for tools that opted into SettingsFields.</summary>
     bool IsConnected(ToolConfigCache cache) => false;
 
+    /// <summary>True for tools that only make sense inside an agent run (they need the calling agent's servers,
+    /// datasets or dashboard). They are left out of chat and the skill tool picker, so their schemas don't cost
+    /// prompt tokens on every chat turn; an agent gets them through its own tool allowlist or its type's required tools.</summary>
+    bool RequiresAgentRun => false;
+
     Task<ToolExecutionResult> ExecuteAsync(JsonElement arguments, ToolExecutionContext context, CancellationToken ct);
 }
 

@@ -11,4 +11,8 @@ public interface IAgentExecutionService
     /// regardless of whether the caller consumes the whole stream. Also updates the parent Agent's
     /// LastRunAt/NextRunAt.</summary>
     IAsyncEnumerable<AgentStreamEvent> RunAsync(Guid agentId, AgentRunTrigger trigger, CancellationToken ct);
+
+    /// <summary>Continues a finished run with a user message: the run's transcript is the conversation so far and the
+    /// agent keeps its tools, so the user can ask it to change what it built. The reply is appended to the same run.</summary>
+    IAsyncEnumerable<AgentStreamEvent> ContinueAsync(Guid agentId, Guid runId, string message, CancellationToken ct);
 }

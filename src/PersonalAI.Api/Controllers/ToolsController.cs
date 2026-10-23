@@ -111,6 +111,7 @@ public class ToolsController(ToolRegistry tools, IToolConfigRepository repo, Too
     private static string DisplayName(string toolName) => toolName switch
     {
         "gmail" => "Gmail",
+        "ssh" => "SSH",
         _ => string.Join(' ', toolName.Split('_', StringSplitOptions.RemoveEmptyEntries)
             .Select(w => char.ToUpperInvariant(w[0]) + w[1..]))
     };
