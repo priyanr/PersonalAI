@@ -87,7 +87,7 @@ public class SshServersService(AppDbContext db, ISshServersRepository repo, ISec
     {
         await ValidateServer(request, ct);
         var server = await repo.GetServerAsync(id, ct) ?? throw ServerNotFound(id);
-        if (await repo.GetGroupAsync(request.GroupId, ct) is null) throw ServerNotFound(id);
+        if (await repo.GetGroupAsync(request.GroupId, ct) is null) throw GroupNotFound(request.GroupId);
         var name = request.Name.Trim();
         await EnsureServerNameFree(request.GroupId, name, id, ct);
 

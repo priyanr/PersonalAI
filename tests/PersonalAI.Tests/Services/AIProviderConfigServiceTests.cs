@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models;
@@ -49,7 +50,7 @@ public class AIProviderConfigServiceTests
         var hybridCache = services.BuildServiceProvider().GetRequiredService<HybridCache>();
         var cache = new AIProviderConfigCache();
         var registry = new AIProviderRegistry([new StubProvider("openai", OpenAiFields), new StubProvider("azure", []), new UnreachableProvider()]);
-        return (new AIProviderConfigService(db, new AIProviderConfigRepository(db), registry, cache, hybridCache), db, cache);
+        return (new AIProviderConfigService(db, new AIProviderConfigRepository(db), registry, cache, hybridCache, NullLogger<AIProviderConfigService>.Instance), db, cache);
     }
 
     private static UpdateAIProviderConfigRequest Values(params (string Name, string? Value)[] values) =>
@@ -110,6 +111,20 @@ public class AIProviderConfigServiceTests
 
         db.AIProviderConfigs.Select(c => new { c.FieldName, c.Value }).Should().BeEquivalentTo(
             [new { FieldName = "ApiKey", Value = (string?)"sk-2" }, new { FieldName = "BaseUrl", Value = (string?)"https://a" }]);
+    }
+
+    [Fact]
+    public async Task UpdateProvider_FieldNameInOtherCase_UpdatesTheExistingRow()
+    {
+        var (service, db, cache) = CreateService();
+        await using var _1 = db;
+
+        await service.UpdateProvider("openai", Values(("ApiKey", "sk-1")), CancellationToken.None);
+        await service.UpdateProvider("openai", Values(("apikey", "sk-2")), CancellationToken.None);
+
+        db.AIProviderConfigs.Select(c => new { c.FieldName, c.Value }).Should().BeEquivalentTo(
+            [new { FieldName = "ApiKey", Value = (string?)"sk-2" }], "a second row differing only in case breaks the startup cache load");
+        cache.GetValue("openai", "ApiKey").Should().Be("sk-2");
     }
 
     [Fact]

@@ -112,6 +112,18 @@ public class SshServersTests
     }
 
     [Fact]
+    public async Task UpdateServer_UnknownGroup_IsNotFoundAndNamesTheGroup()
+    {
+        await using var db = NewDb();
+        var server = await SeedServerAsync(db);
+        var missingGroup = Guid.NewGuid();
+
+        var act = () => NewService(db).UpdateServer(server.Id, Request(server, "web-1", "10.0.0.5") with { GroupId = missingGroup }, CancellationToken.None);
+
+        await act.Should().ThrowAsync<NotFoundException>().WithMessage($"Server group {missingGroup} not found.");
+    }
+
+    [Fact]
     public async Task UpdateServer_ChangedAddress_ClearsPinnedHostKey()
     {
         await using var db = NewDb();

@@ -2,6 +2,15 @@
 
 Append-only log of what was done and why, newest entry first.
 
+### Fix code-review bugs in the rework (rework, 2026-10-24)
+- What: provider and tool settings save under the field's defined name, so a request spelling it in another case
+  (`apikey`) updates the existing row instead of adding a duplicate that broke the startup cache load; a failed model
+  list is logged again; moving an SSH server to a missing group says "Server group … not found" instead of
+  "Server … not found" (still 404).
+- Why: user request after the code review.
+- Touched: AIProviderConfigService, ToolConfigService, SshServersService. No API, prompt or schema change.
+- Verified: build, 1081 tests pass (3 new regression tests).
+
 ### Simplify the agent loops and the largest files (rework, 2026-10-24)
 - What: ChatAgentService split: compaction moved to ChatHistoryCompaction; one refusal path and one result recorder in
   the tool loop. Shared ProgressStream (run work, stream its progress) and SkillExecutionService.RunAsToolAsync replace

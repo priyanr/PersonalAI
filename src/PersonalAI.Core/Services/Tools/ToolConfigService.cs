@@ -44,7 +44,9 @@ public class ToolConfigService(AppDbContext db, IToolConfigRepository repo, Tool
             if (field.Type == ToolSettingFieldType.Number && !string.IsNullOrEmpty(value) && !(int.TryParse(value, out var number) && number > 0))
                 throw new InvalidRequestException($"'{fieldName}' must be a positive whole number.");
 
-            updates[fieldName] = value;
+            // Keyed by the field's own spelling: the startup load into ToolConfigCache is case-insensitive, so a
+            // second row differing only in case would stop the API from starting.
+            updates[field.Name] = value;
         }
 
         var effective = new Dictionary<string, string?>(await repo.GetValuesAsync(tool.Name, ct), StringComparer.OrdinalIgnoreCase);

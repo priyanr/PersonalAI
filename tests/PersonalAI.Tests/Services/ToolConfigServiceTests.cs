@@ -54,6 +54,20 @@ public class ToolConfigServiceTests
     }
 
     [Fact]
+    public async Task Update_FieldNameInOtherCase_UpdatesTheExistingRow()
+    {
+        var (service, db, cache) = CreateService();
+        await using var _ = db;
+        await service.Update("mail_tool", Values(("ClientId", "id"), ("ClientSecret", "s1")), CancellationToken.None);
+
+        await service.Update("mail_tool", Values(("clientid", "id2")), CancellationToken.None);
+
+        db.ToolConfigs.Select(c => c.FieldName).Should().BeEquivalentTo(["ClientId", "ClientSecret"],
+            "a second row differing only in case breaks the startup cache load");
+        cache.GetValue("mail_tool", "ClientId").Should().Be("id2");
+    }
+
+    [Fact]
     public async Task Update_MissingRequiredField_IsInvalidAndSavesNothing()
     {
         var (service, db, cache) = CreateService();

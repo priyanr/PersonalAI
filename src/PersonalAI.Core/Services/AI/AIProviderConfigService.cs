@@ -6,13 +6,15 @@ using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Hybrid;
+using Microsoft.Extensions.Logging;
 
 namespace PersonalAI.Core.Services.AI;
 
 /// <summary>Provider connection settings (/api/ai-providers) and the models each provider offers with their per-model
 /// settings (/api/models). Every save also updates AIProviderConfigCache, which the providers read on each call.</summary>
 public class AIProviderConfigService(
-    AppDbContext db, IAIProviderConfigRepository repo, AIProviderRegistry providers, AIProviderConfigCache cache, HybridCache modelLists)
+    AppDbContext db, IAIProviderConfigRepository repo, AIProviderRegistry providers, AIProviderConfigCache cache, HybridCache modelLists,
+    ILogger<AIProviderConfigService> logger)
 {
     private static readonly HybridCacheEntryOptions ModelListCacheOptions = new()
     {
@@ -55,7 +57,9 @@ public class AIProviderConfigService(
                 maxTokens > AIProviderConfigCache.MaxOutputTokensUpperBound)
                 throw new InvalidRequestException($"'{name}' can be at most {AIProviderConfigCache.MaxOutputTokensUpperBound:N0}.");
 
-            updates[name] = value;
+            // Keyed by the field's own spelling: the startup load into AIProviderConfigCache is case-insensitive, so a
+            // second row differing only in case would stop the API from starting.
+            updates[field.Name] = value;
         }
 
         var existing = await db.AIProviderConfigs.Where(c => c.ProviderKey == provider.Key).ToDictionaryAsync(c => c.FieldName, ct);
@@ -102,6 +106,7 @@ public class AIProviderConfigService(
         }
         catch (HttpRequestException ex)
         {
+            logger.LogError(ex, "Error listing models for provider {ProviderKey}", providerKey);
             throw new UpstreamUnavailableException($"Could not reach {provider.DisplayName}: {ex.Message}", ex);
         }
         // Settings are merged per request rather than cached with the list, so a saved change shows immediately.
