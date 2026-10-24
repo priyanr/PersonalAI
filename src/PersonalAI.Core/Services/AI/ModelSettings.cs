@@ -93,8 +93,10 @@ public static class ModelSettings
         return normalized is not null;
     }
 
-    public static string InvalidReasoningEffortMessage(string? value) =>
-        $"'{value}' is not a valid reasoning effort. Allowed: {string.Join(", ", ReasoningEffortLevels)} (or blank for the model's default).";
+    public static string InvalidReasoningEffortMessage(string? value)
+    {
+        return $"'{value}' is not a valid reasoning effort. Allowed: {string.Join(", ", ReasoningEffortLevels)} (or blank for the model's default).";
+    }
 
     /// <summary>Checks <paramref name="values"/> against <paramref name="fields"/> and returns them
     /// with canonical field names and option casing, minus blank/"auto" entries (those mean "use the default").

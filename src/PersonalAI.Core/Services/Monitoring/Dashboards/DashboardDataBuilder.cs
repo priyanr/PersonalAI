@@ -18,7 +18,7 @@ public record EmptyData();
 
 /// <summary>Runs each widget's query against the agent's datasets and shapes the result for the frontend.
 /// A failing widget yields <see cref="WidgetError"/> and never fails the whole dashboard.</summary>
-public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvider? time = null, IReadOnlyDictionary<string, TimeSpan>? freshness = null)
+public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvider time, IReadOnlyDictionary<string, TimeSpan>? freshness)
 {
     public const int MaxSeries = 8, DefaultBarLimit = 12, DefaultTableLimit = 20, FetchLimit = 2000, SeriesPerEntityLimit = 12000;
 
@@ -27,8 +27,6 @@ public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvid
     /// dataset written less often than every ~20 minutes gets a longer window from <c>freshness</c> (three times its
     /// job's interval), so a daily discovery is not "No data" for 23 hours of every day.</summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromHours(1);
-
-    private readonly TimeProvider _time = time ?? TimeProvider.System;
 
     public async Task<Dictionary<string, object>> BuildAsync(Guid agentId, DashboardSpec spec, CancellationToken ct)
     {
@@ -78,7 +76,7 @@ public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvid
         var raw = await datasets.QueryAsync(agentId, q.Dataset!, null, null, null, true, FetchLimit, ct);
         if (raw is null) return null;
         var window = freshness is not null && freshness.TryGetValue(q.Dataset!, out var w) && w > StaleAfter ? w : StaleAfter;
-        var cutoff = _time.GetUtcNow().UtcDateTime - window;
+        var cutoff = time.GetUtcNow().UtcDateTime - window;
         return [.. MonitoringRows.Filter(MonitoringRows.Parse(raw), q.Target, q.Filter).Where(r => r.Ts >= cutoff)];
     }
 
@@ -88,7 +86,10 @@ public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvid
         if (o.Warn is null && o.Crit is null) return null;
 
         var lower = o.LowerIsWorse == true;
-        bool Trips(double? limit) => limit is { } l && (lower ? value <= l : value >= l);
+        bool Trips(double? limit)
+        {
+            return limit is { } l && (lower ? value <= l : value >= l);
+        }
         return Trips(o.Crit) ? "critical" : Trips(o.Warn) ? "warning" : "ok";
     }
 
@@ -158,20 +159,23 @@ public sealed class DashboardDataBuilder(IDatasetRepository datasets, TimeProvid
         return new TableData(columns, cells, Math.Max(0, ordered.Count - limit));
     }
 
-    private static object? Cell(JsonNode? node) => node switch
+    private static object? Cell(JsonNode? node)
     {
-        null => null,
-        JsonValue v when v.TryGetValue<double>(out var d) => d,
-        JsonValue v when v.TryGetValue<bool>(out var b) => b,
-        JsonValue v when v.TryGetValue<string>(out var s) => s,
-        _ => node.ToJsonString()
-    };
+        return node switch
+        {
+            null => null,
+            JsonValue v when v.TryGetValue<double>(out var d) => d,
+            JsonValue v when v.TryGetValue<bool>(out var b) => b,
+            JsonValue v when v.TryGetValue<string>(out var s) => s,
+            _ => node.ToJsonString()
+        };
+    }
 
     private async Task<object> BuildTimeseriesAsync(Guid agentId, WidgetQuery q, WidgetOptions o, CancellationToken ct)
     {
         var window = q.WindowMinutes ?? 60;
         var bucket = q.BucketMinutes ?? Math.Max(1, (int)Math.Ceiling(window / 120.0));
-        var now = _time.GetUtcNow().UtcDateTime;
+        var now = time.GetUtcNow().UtcDateTime;
         var from = now.AddMinutes(-window);
         var lower = o.LowerIsWorse == true;
 

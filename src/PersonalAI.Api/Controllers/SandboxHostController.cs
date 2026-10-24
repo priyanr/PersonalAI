@@ -64,8 +64,10 @@ public class SandboxHostController(
     /// ("::ffff:172.17.0.1") — mapped back down here so what gets stored and eventually put in a URL is
     /// the plain, unambiguous IPv4 form rather than confusing IPv6 syntax. Public and static purely so
     /// this one piece of real logic is unit-testable without a WebSocket handshake.</summary>
-    public static string? NormalizeRemoteIp(IPAddress? address) =>
-        address is { IsIPv4MappedToIPv6: true } ? address.MapToIPv4().ToString() : address?.ToString();
+    public static string? NormalizeRemoteIp(IPAddress? address)
+    {
+        return address is { IsIPv4MappedToIPv6: true } ? address.MapToIPv4().ToString() : address?.ToString();
+    }
 
     [HttpGet("status")]
     public async Task<ActionResult<SandboxStatusDto>> Status(CancellationToken ct)

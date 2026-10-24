@@ -31,8 +31,10 @@ public sealed class OllamaProvider(HttpClient httpClient, AIProviderConfigCache 
         AIProviderConfigCache.MaxOutputTokensConfigField
     ];
 
-    private string ResolveBaseUrl() =>
-        (configCache.GetValue(ProviderKey, "BaseUrl") ?? DefaultBaseUrl).TrimEnd('/');
+    private string ResolveBaseUrl()
+    {
+        return (configCache.GetValue(ProviderKey, "BaseUrl") ?? DefaultBaseUrl).TrimEnd('/');
+    }
 
     public async IAsyncEnumerable<AiChatChunk> ChatStreamAsync(
         string model,
@@ -180,30 +182,36 @@ public sealed class OllamaProvider(HttpClient httpClient, AIProviderConfigCache 
         }
     }
 
-    private static OllamaMessageWire ToWireMessage(AiChatMessage m) => new()
+    private static OllamaMessageWire ToWireMessage(AiChatMessage m)
     {
-        Role = m.Role,
-        Content = m.Content ?? "",
-        ToolCalls = m.ToolCalls is { Count: > 0 }
-            ? [.. m.ToolCalls.Select(tc => new OllamaToolCallWire
-            {
-                Function = new OllamaFunctionCallWire
-                {
-                    Name = tc.Name,
-                    Arguments = JsonDocument.Parse(tc.WireArgumentsJson).RootElement.Clone()
-                }
-            })]
-            : null
-    };
-
-    private static OllamaToolWire ToWireTool(AiToolDefinition t) => new()
-    {
-        Type = "function",
-        Function = new OllamaFunctionDefWire
+        return new()
         {
-            Name = t.Name,
-            Description = t.Description,
-            Parameters = JsonDocument.Parse(t.ParametersSchemaJson).RootElement.Clone()
-        }
-    };
+            Role = m.Role,
+            Content = m.Content ?? "",
+            ToolCalls = m.ToolCalls is { Count: > 0 }
+                ? [.. m.ToolCalls.Select(tc => new OllamaToolCallWire
+                {
+                    Function = new OllamaFunctionCallWire
+                    {
+                        Name = tc.Name,
+                        Arguments = JsonDocument.Parse(tc.WireArgumentsJson).RootElement.Clone()
+                    }
+                })]
+                : null
+        };
+    }
+
+    private static OllamaToolWire ToWireTool(AiToolDefinition t)
+    {
+        return new()
+        {
+            Type = "function",
+            Function = new OllamaFunctionDefWire
+            {
+                Name = t.Name,
+                Description = t.Description,
+                Parameters = JsonDocument.Parse(t.ParametersSchemaJson).RootElement.Clone()
+            }
+        };
+    }
 }

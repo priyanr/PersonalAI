@@ -29,9 +29,10 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
         var t = DateTime.UtcNow;
-        await repo.AddPointsAsync(agent, [Point("a", t.AddMinutes(-10), "{\"v\":1}"), Point("a", t, "{\"v\":2}"), Point("b", t.AddMinutes(-5), "{\"v\":3}")], CancellationToken.None);
+        await data.AddPointsAsync(agent, [Point("a", t.AddMinutes(-10), "{\"v\":1}"), Point("a", t, "{\"v\":2}"), Point("b", t.AddMinutes(-5), "{\"v\":3}")], CancellationToken.None);
 
         var rows = await repo.QueryAsync(agent, "system", null, null, null, true, 100, CancellationToken.None);
 
@@ -43,9 +44,10 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
         var t = DateTime.UtcNow;
-        await repo.AddPointsAsync(agent, [.. Enumerable.Range(0, 10).Select(i => Point("a", t.AddMinutes(-10 + i), $"{{\"i\":{i}}}"))], CancellationToken.None);
+        await data.AddPointsAsync(agent, [.. Enumerable.Range(0, 10).Select(i => Point("a", t.AddMinutes(-10 + i), $"{{\"i\":{i}}}"))], CancellationToken.None);
 
         var rows = await repo.QueryAsync(agent, "system", null, null, t.AddMinutes(-20), false, 3, CancellationToken.None);
 
@@ -57,8 +59,9 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
-        await repo.AddPointsAsync(agent, [Point("t1|/", DateTime.UtcNow), Point("t2|/", DateTime.UtcNow)], CancellationToken.None);
+        await data.AddPointsAsync(agent, [Point("t1|/", DateTime.UtcNow), Point("t2|/", DateTime.UtcNow)], CancellationToken.None);
 
         (await repo.QueryAsync(agent, "nope", null, null, null, false, 10, CancellationToken.None)).Should().BeNull();
         (await repo.QueryAsync(agent, "system", null, "t1", null, false, 10, CancellationToken.None))!.Should().ContainSingle();
@@ -69,15 +72,16 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
         var old = DateTime.UtcNow.AddDays(-60);
-        await repo.AddPointsAsync(agent,
+        await data.AddPointsAsync(agent,
         [
             Point("a", old), Point("a", DateTime.UtcNow),
             Point("a", old.AddDays(-1), dataset: "container", kind: DatasetKind.Snapshot), Point("a", old, dataset: "container", kind: DatasetKind.Snapshot)
         ], CancellationToken.None);
 
-        var removed = await repo.PruneAsync(agent, DateTime.UtcNow.AddDays(-30), CancellationToken.None);
+        var removed = await data.PruneAsync(agent, DateTime.UtcNow.AddDays(-30), CancellationToken.None);
 
         // 1 old system point + both old container points: a snapshot entity that stopped reporting is not kept forever
         removed.Should().Be(3);
@@ -90,13 +94,14 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
         var old = DateTime.UtcNow.AddDays(-60);
         var points = Enumerable.Range(0, 11_000).Select(i => Point($"e{i % 50}", old.AddSeconds(i))).ToList();
         points.Add(Point("e0", DateTime.UtcNow));
-        await repo.AddPointsAsync(agent, points, CancellationToken.None);
+        await data.AddPointsAsync(agent, points, CancellationToken.None);
 
-        var removed = await repo.PruneAsync(agent, DateTime.UtcNow.AddDays(-30), CancellationToken.None);
+        var removed = await data.PruneAsync(agent, DateTime.UtcNow.AddDays(-30), CancellationToken.None);
 
         removed.Should().Be(11_000);
         (await repo.QueryAsync(agent, "system", null, null, null, false, 100, CancellationToken.None))!.Should().ContainSingle();
@@ -107,10 +112,11 @@ public class DatasetRepositoryTests
     {
         await using var db = NewDb();
         var repo = new DatasetRepository(db);
+        var data = new DatasetService(db, repo, new AgentsRepository(db));
         var agent = Guid.NewGuid();
 
-        await repo.EnsureDatasetsAsync(agent, new[] { DataSourceStatus.Definition }.ToList(), CancellationToken.None);
-        await repo.EnsureDatasetsAsync(agent, new[] { DataSourceStatus.Definition }.ToList(), CancellationToken.None);
+        await data.EnsureDatasetsAsync(agent, new[] { DataSourceStatus.Definition }.ToList(), CancellationToken.None);
+        await data.EnsureDatasetsAsync(agent, new[] { DataSourceStatus.Definition }.ToList(), CancellationToken.None);
 
         (await repo.ListAsync(agent, CancellationToken.None)).Should().HaveCount(1);
     }

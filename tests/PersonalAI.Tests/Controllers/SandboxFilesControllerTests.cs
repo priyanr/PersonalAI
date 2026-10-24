@@ -25,7 +25,7 @@ namespace PersonalAI.Tests.Controllers;
 /// directly without needing a real broker.</summary>
 public class SandboxFilesControllerTests
 {
-    private sealed record Harness(SandboxFilesController Controller, ISandboxRepository Repository, Mock<ISandboxHostClient> HostClient);
+    private sealed record Harness(SandboxFilesController Controller, AppDbContext Db, Mock<ISandboxHostClient> HostClient);
 
     private static Harness NewHarness(SandboxSettings? settings = null)
     {
@@ -36,16 +36,17 @@ public class SandboxFilesControllerTests
         var repository = provider.GetRequiredService<ISandboxRepository>();
 
         var hostClient = new Mock<ISandboxHostClient>();
-        var provisioning = new SandboxProvisioningService(hostClient.Object, repository);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var provisioning = new SandboxProvisioningService(db, hostClient.Object, repository);
         var controller = new SandboxFilesController(provisioning, hostClient.Object, Options.Create(settings ?? new SandboxSettings()));
 
-        return new Harness(controller, repository, hostClient);
+        return new Harness(controller, db, hostClient);
     }
 
-    private static async Task<Guid> SeedRunningSandboxAsync(ISandboxRepository repo)
+    private static async Task<Guid> SeedRunningSandboxAsync(AppDbContext db)
     {
         var ownerId = Guid.NewGuid();
-        await repo.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -72,7 +73,7 @@ public class SandboxFilesControllerTests
     public async Task List_BrokerDisconnectsMidRequest_Returns503()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new SandboxHostDisconnectedException("gone"));
@@ -86,7 +87,7 @@ public class SandboxFilesControllerTests
     public async Task List_Success_MapsToFileOpListWithDefaultPathAndRecursiveFlag()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null, Entries: [new FileEntry("a.txt", false, 3, DateTimeOffset.UtcNow)]));
@@ -103,7 +104,7 @@ public class SandboxFilesControllerTests
     public async Task GetContent_TextFile_ReturnsIsTextTrueWithDecodedContent()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.ReadRaw), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null, ContentBase64: Base64("hello world"), TotalSize: 11));
@@ -120,7 +121,7 @@ public class SandboxFilesControllerTests
     public async Task GetContent_BinaryFile_ReturnsIsTextFalseWithNoContent()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         byte[] binary = [0x00, 0xFF, 0xD8, 0xFF, 0xE0]; // embedded NUL — not valid text under any decode
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.ReadRaw), It.IsAny<CancellationToken>()))
@@ -137,7 +138,7 @@ public class SandboxFilesControllerTests
     public async Task GetContent_MissingPath_ReturnsBadRequestWithoutCallingTheHost()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
 
         var result = await h.Controller.GetContent(ownerId, null, CancellationToken.None);
 
@@ -149,7 +150,7 @@ public class SandboxFilesControllerTests
     public async Task SaveContent_Success_CallsWriteWithUtf8EncodedContent()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -170,7 +171,7 @@ public class SandboxFilesControllerTests
         // large to save back — Write's own default cap is the much smaller MaxFileTransferBytes, sized
         // for the model's write_file tool, not this editor.
         var h = NewHarness(new SandboxSettings { MaxDownloadBytes = 999_000 });
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -185,7 +186,7 @@ public class SandboxFilesControllerTests
     public async Task List_RequestTimesOut_Returns503()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new TimeoutException());
@@ -199,7 +200,7 @@ public class SandboxFilesControllerTests
     public async Task Download_Success_ReturnsFileWithGuessedContentTypeAndFileName()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.ReadRaw), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null, ContentBase64: Base64("hi"), TotalSize: 2));
@@ -216,7 +217,7 @@ public class SandboxFilesControllerTests
     public async Task Download_UnrecognizedExtension_FallsBackToOctetStream()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.ReadRaw), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null, ContentBase64: Base64("x"), TotalSize: 1));
@@ -230,7 +231,7 @@ public class SandboxFilesControllerTests
     public async Task Zip_Success_ReturnsZipFileNamedAfterOwner()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.Zip), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null, ContentBase64: Base64("pkzip-bytes")));
@@ -249,7 +250,7 @@ public class SandboxFilesControllerTests
     public async Task Zip_HostReportsFailure_ReturnsBadRequestWithMessage()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.Is<FileOpRequest>(r => r.Op == FileOp.Zip), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), false, "selection too large"));
@@ -263,7 +264,7 @@ public class SandboxFilesControllerTests
     public async Task Upload_Success_WritesToTheTargetDirectoryAndReturnsOk()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -284,7 +285,7 @@ public class SandboxFilesControllerTests
     public async Task Upload_EmptyFile_ReturnsBadRequestWithoutCallingTheHost()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         var formFile = new FormFile(new MemoryStream([]), 0, 0, "file", "empty.txt");
 
         var result = await h.Controller.Upload(ownerId, ".", formFile, CancellationToken.None);
@@ -297,7 +298,7 @@ public class SandboxFilesControllerTests
     public async Task Mkdir_Success_CallsMakeDirectory()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -313,7 +314,7 @@ public class SandboxFilesControllerTests
     public async Task Delete_Success_CallsDeleteWithRecursiveFlag()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -329,7 +330,7 @@ public class SandboxFilesControllerTests
     public async Task Move_Success_CallsMoveWithDestination()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
         h.HostClient
             .Setup(c => c.FileOpAsync(It.IsAny<FileOpRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new FileOpResponse(Guid.NewGuid(), true, null));
@@ -345,7 +346,7 @@ public class SandboxFilesControllerTests
     public async Task Move_MissingDestination_ReturnsBadRequestWithoutCallingTheHost()
     {
         var h = NewHarness();
-        var ownerId = await SeedRunningSandboxAsync(h.Repository);
+        var ownerId = await SeedRunningSandboxAsync(h.Db);
 
         var result = await h.Controller.Move(ownerId, new SandboxMoveRequest("old.txt", ""), CancellationToken.None);
 

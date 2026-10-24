@@ -88,7 +88,7 @@ A new use case = a target kind + collector tools with an output contract + an ag
 - `ISshRunner` (`SshNetRunner`) runs one fixed command with a timeout. Host keys are pinned on first success
   (trust on first use, SHA256 fingerprint); a mismatch fails the connection. Changing address, port or username
   clears the pin, and `POST /api/ssh/servers/{id}/reset-host-key` clears it explicitly.
-- `SshConnectionService` runs the probe `uname -sr`, records `LastSeenAt` / `LastError`, and pins the key only
+- `SshServersService.TestConnection` runs the probe `uname -sr`, records `LastSeenAt` / `LastError` (`SshServer.RecordConnection`), and pins the key only
   after a successful, authenticated connection.
 - UI: Settings -> Tools -> SSH (groups, servers, test connection, reset host key). The agent form selects which
   groups a Dashboard & Alerts agent monitors.
@@ -409,7 +409,7 @@ The SSH machines were first called "targets", which collided with the generic `t
 (the connection's name, whatever the tool). They are now `SshServer` / `SshServerGroup`:
 
 - Entities `SshServer`, `SshServerGroup`; tables `SshServers`, `SshServerGroups`; `ISshServersRepository`,
-  `SshServersRepository`, `SshConnectionService`, `SshServersController`; the code lives in `Services/Ssh`
+  `SshServersRepository`, `SshServersService`, `SshServersController`; the code lives in `Services/Ssh`
   (namespace `PersonalAI.Core.Services.Ssh`).
 - Routes: `/api/ssh/servers` and `/api/ssh/server-groups` (were `/api/targets`, `/api/target-groups`). The group
   list's `targetCount` is `serverCount`.

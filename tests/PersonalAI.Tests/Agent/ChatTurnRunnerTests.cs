@@ -1,10 +1,22 @@
 using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using FluentAssertions;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Models.DTOs;
+using PersonalAI.Core.Models.Entities;
+using PersonalAI.Core.Models.Entities.Enums;
+using PersonalAI.Core.Models.Settings;
 using PersonalAI.Core.Services.Agent;
+using PersonalAI.Core.Services.AI;
+using PersonalAI.Core.Services.Sessions;
+using PersonalAI.Core.Services.Settings;
+using PersonalAI.Core.Services.Skills;
+using PersonalAI.Core.Tools;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 
 namespace PersonalAI.Tests.Agent;
 
@@ -12,38 +24,63 @@ public class ChatTurnRunnerTests
 {
     private static readonly TimeSpan Wait = TimeSpan.FromSeconds(10);
 
-    /// <summary>Only the finalize hook and InFlightAssistantText matter here — each turn's body is supplied
-    /// by the test itself, so the loop methods are never called.</summary>
-    private sealed class RecordingAgent(FinalizeLog log) : IChatAgentService
+    /// <summary>Streams "partial" and then waits until cancelled, so a stopped turn has in-flight text to save.</summary>
+    private sealed class StallingProvider : IAIProvider
     {
-        public string? InFlightAssistantText => log.InFlightText;
+        public string Key => "ollama";
+        public string DisplayName => "Stalling";
+        public IReadOnlyList<ProviderConfigField> ConfigFields => [];
 
-        public Task FinalizeInterruptedTurnAsync(Guid sessionId, string? partialAssistantText, string interruptionReason, string? systemNotice, CancellationToken ct)
+        public async IAsyncEnumerable<AiChatChunk> ChatStreamAsync(
+            string model, IReadOnlyList<AiChatMessage> messages, IReadOnlyList<AiToolDefinition> tools,
+            int? numCtx, bool? think, string? reasoningEffort, [EnumeratorCancellation] CancellationToken ct)
         {
-            lock (log) log.Calls.Add((sessionId, partialAssistantText, interruptionReason, systemNotice));
-            return Task.CompletedTask;
+            yield return new AiChatChunk("partial", null, false);
+            await Task.Delay(Timeout.Infinite, ct);
         }
 
-        public IAsyncEnumerable<AgentStreamEvent> RunTurnAsync(Guid sessionId, string userText, CancellationToken ct) => throw new NotSupportedException();
-        public IAsyncEnumerable<AgentStreamEvent> ContinueTurnAsync(Guid sessionId, CancellationToken ct) => throw new NotSupportedException();
-        public IAsyncEnumerable<AgentStreamEvent> ResolveApprovalAsync(Guid toolInvocationId, bool approved, CancellationToken ct) => throw new NotSupportedException();
-        public IAsyncEnumerable<AgentStreamEvent> CompactHistoryAsync(Guid sessionId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<AiModelInfo>> ListModelsAsync(CancellationToken ct)
+        {
+            throw new NotSupportedException();
+        }
+
+        public IAsyncEnumerable<AiPullProgress> PullModelStreamAsync(string modelName, CancellationToken ct)
+        {
+            throw new NotSupportedException();
+        }
     }
 
-    private sealed class FinalizeLog
+    /// <summary>A runner whose scopes get a real ChatAgentService on one shared in-memory database.</summary>
+    private static (ChatTurnRunner Runner, Func<AppDbContext> NewDb) CreateRunner()
     {
-        public string? InFlightText { get; set; }
-        public List<(Guid SessionId, string? Partial, string Reason, string? Notice)> Calls { get; } = [];
-    }
-
-    private static (ChatTurnRunner Runner, FinalizeLog Log) CreateRunner()
-    {
-        var log = new FinalizeLog();
+        var dbName = Guid.NewGuid().ToString();
+        AppDbContext NewDb() => new(new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(dbName).Options);
         var services = new ServiceCollection()
-            .AddSingleton(log)
-            .AddScoped<IChatAgentService, RecordingAgent>()
+            .AddScoped(_ => NewDb())
+            .AddScoped(sp =>
+            {
+                var db = sp.GetRequiredService<AppDbContext>();
+                return new ChatAgentService(
+                    db, new ChatSessionRepository(db), new SkillsRepository(db), new FakeSkillProvider().CreateService(db),
+                    new ChatHistoryCompaction(db, new AIProviderRegistry([new StallingProvider()]), Options.Create(new AgentSettings { MaxIterations = 25 })),
+                    new AIProviderRegistry([new StallingProvider()]), new ToolRegistry([]),
+                    Options.Create(new OllamaSettings { BaseUrl = "http://localhost:11434", DefaultSystemPrompt = "system" }),
+                    Options.Create(new AgentSettings { MaxIterations = 25 }), new AppSettingsCache());
+            })
             .BuildServiceProvider();
-        return (new ChatTurnRunner(services.GetRequiredService<IServiceScopeFactory>(), NullLogger<ChatTurnRunner>.Instance), log);
+        return (new ChatTurnRunner(services.GetRequiredService<IServiceScopeFactory>(), NullLogger<ChatTurnRunner>.Instance), NewDb);
+    }
+
+    private static async Task<Guid> CreateSessionAsync(Func<AppDbContext> newDb)
+    {
+        await using var db = newDb();
+        return (await TestSeed.SessionAsync(db, null, "m", CancellationToken.None)).Id;
+    }
+
+    private static async Task<IReadOnlyList<ChatMessage>> MessagesAsync(Func<AppDbContext> newDb, Guid sessionId)
+    {
+        await using var db = newDb();
+        return await new ChatSessionRepository(db).GetMessagesAsync(sessionId, CancellationToken.None);
     }
 
     /// <summary>A turn body the test drives by hand: writes to <paramref name="source"/> become events.</summary>
@@ -122,22 +159,33 @@ public class ChatTurnRunnerTests
     }
 
     [Fact]
-    public async Task TryStop_FinalizesWithPartialTextAndNotice_ThenPublishesDone()
+    public async Task TryStop_SavesInFlightTextAndNotice_ThenPublishesDone()
     {
-        var (runner, log) = CreateRunner();
-        var sessionId = Guid.NewGuid();
-        var source = Channel.CreateUnbounded<AgentStreamEvent>();
-        var turn = runner.TryStart(sessionId, (_, ct) => Feed(source.Reader, ct))!;
-        var viewer = CollectAsync(turn);
-        await source.Writer.WriteAsync(new TextDeltaEvent("partial"));
-        log.InFlightText = "partial";
+        var (runner, newDb) = CreateRunner();
+        var sessionId = await CreateSessionAsync(newDb);
+        var turn = runner.TryStart(sessionId, (agent, ct) => agent.RunTurnAsync(sessionId, "hi", ct))!;
+        var sawText = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var viewer = Task.Run(async () =>
+        {
+            var seen = new List<AgentStreamEvent>();
+            await foreach (var e in turn.SubscribeAsync(CancellationToken.None))
+            {
+                seen.Add(e);
+                if (e is TextDeltaEvent) sawText.TrySetResult();
+            }
+            return seen;
+        });
+        await sawText.Task.WaitAsync(Wait);
 
         runner.TryStop(sessionId).Should().BeTrue();
 
         var events = await viewer.WaitAsync(Wait);
         events[^1].Should().BeOfType<DoneEvent>();
-        log.Calls.Should().ContainSingle().Which.Should().Be(
-            (sessionId, "partial", ChatTurnRunner.UserStopReason, $"Turn interrupted: {ChatTurnRunner.UserStopReason}."));
+        var messages = await MessagesAsync(newDb, sessionId);
+        messages.Select(m => (m.Role, m.Content)).Should().Equal(
+            (MessageRole.User, "hi"),
+            (MessageRole.Assistant, "partial"),
+            (MessageRole.System, $"Turn interrupted: {ChatTurnRunner.UserStopReason}."));
         await WaitUntilGoneAsync(runner, sessionId);
         runner.TryStop(sessionId).Should().BeFalse();
     }
@@ -145,14 +193,14 @@ public class ChatTurnRunnerTests
     [Fact]
     public async Task FailingTurn_FinalizesWithoutNotice_AndPublishesError()
     {
-        var (runner, log) = CreateRunner();
-        var sessionId = Guid.NewGuid();
+        var (runner, newDb) = CreateRunner();
+        var sessionId = await CreateSessionAsync(newDb);
         var turn = runner.TryStart(sessionId, (_, ct) => Throwing(ct))!;
 
         var events = await CollectAsync(turn).WaitAsync(Wait);
 
         events[^1].Should().Be(new ErrorEvent("provider exploded"));
-        log.Calls.Should().ContainSingle().Which.Notice.Should().BeNull();
+        (await MessagesAsync(newDb, sessionId)).Should().NotContain(m => m.Role == MessageRole.System);
 
         static async IAsyncEnumerable<AgentStreamEvent> Throwing([EnumeratorCancellation] CancellationToken ct)
         {
@@ -165,16 +213,17 @@ public class ChatTurnRunnerTests
     [Fact]
     public async Task StopAllAsync_StopsEveryTurnWithTheShutdownReason()
     {
-        var (runner, log) = CreateRunner();
-        var a = Guid.NewGuid();
-        var b = Guid.NewGuid();
+        var (runner, newDb) = CreateRunner();
+        var a = await CreateSessionAsync(newDb);
+        var b = await CreateSessionAsync(newDb);
         runner.TryStart(a, (_, ct) => Feed(Channel.CreateUnbounded<AgentStreamEvent>().Reader, ct));
         runner.TryStart(b, (_, ct) => Feed(Channel.CreateUnbounded<AgentStreamEvent>().Reader, ct));
 
         await runner.StopAllAsync(CancellationToken.None).WaitAsync(Wait);
 
-        log.Calls.Select(c => c.SessionId).Should().BeEquivalentTo([a, b]);
-        log.Calls.Should().OnlyContain(c => c.Reason == ChatTurnRunner.ShutdownStopReason);
+        foreach (var sessionId in new[] { a, b })
+            (await MessagesAsync(newDb, sessionId)).Should().ContainSingle(m =>
+                m.Role == MessageRole.System && m.Content == $"Turn interrupted: {ChatTurnRunner.ShutdownStopReason}.");
         runner.GetActive(a).Should().BeNull();
         runner.GetActive(b).Should().BeNull();
     }

@@ -3,6 +3,7 @@ using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 using Renci.SshNet;
 using Renci.SshNet.Common;
+using PersonalAI.Core.Services.Secrets;
 
 namespace PersonalAI.Core.Services.Ssh;
 
@@ -87,6 +88,8 @@ public sealed class SshNetRunner(ISecretsRepository secrets) : ISshRunner
         return new ConnectionInfo(server.Address, server.Port, server.Username, auth) { Timeout = timeout };
     }
 
-    private static SshCommandResult Failure(string error, string? fingerprint) =>
-        new(false, -1, "", "", error, fingerprint);
+    private static SshCommandResult Failure(string error, string? fingerprint)
+    {
+        return new(false, -1, "", "", error, fingerprint);
+    }
 }

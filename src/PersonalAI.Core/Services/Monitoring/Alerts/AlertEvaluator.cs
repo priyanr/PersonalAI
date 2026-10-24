@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 
@@ -8,19 +9,14 @@ namespace PersonalAI.Core.Services.Monitoring.Alerts;
 
 public record AlertEvaluationResult(int Fired, int Resolved);
 
-/// <summary>Evaluates an agent's enabled alert rules against the newest data point of every matching entity.
-/// Deterministic and model-free, run after each collection pass.
-///
-/// Per (rule, entity): a violating sample opens a Pending event, which becomes Firing once it has held for the
-/// rule's ForMinutes (measured in data-point time, so the result doesn't depend on when this runs); a clean
-/// sample resolves a Firing event or silently drops a Pending one. Samples older than <c>staleAfter</c> are
-/// ignored: stale data neither opens nor resolves an alert, so a collector outage doesn't flap them.
-///
-/// An alert whose entity can no longer be evaluated is closed rather than left firing forever: the entity no
-/// longer matches the rule (the rule was edited), it stopped reporting this field, or it disappeared. The
-/// "stopped reporting" case is only acted on while the rest of the dataset is still fresh, which is how a removed
-/// container is told apart from a collector that is simply down.</summary>
-public sealed class AlertEvaluator(IAlertsRepository alerts, IDatasetRepository datasets, ILogger<AlertEvaluator> logger)
+/// <summary>Checks an agent's enabled alert rules against the newest data point of every entity, after each collection
+/// pass, without a model. Per rule and entity:
+/// - a violating sample opens a Pending alert, which fires once it has held for ForMinutes (in data-point time);
+/// - a clean sample resolves a firing alert, or drops a pending one;
+/// - stale samples are ignored, so a collector outage neither opens nor resolves anything;
+/// - an alert whose entity no longer matches, stops reporting the field or disappears is closed. "Disappeared" only
+///   counts while the rest of the dataset is fresh: that is how a removed container differs from a collector that is down.</summary>
+public sealed class AlertEvaluator(AppDbContext db, IAlertsRepository alerts, IDatasetRepository datasets, ILogger<AlertEvaluator> logger)
 {
     private const int FetchLimit = 2000;
 
@@ -73,9 +69,7 @@ public sealed class AlertEvaluator(IAlertsRepository alerts, IDatasetRepository 
                 drop.Add(e); // never fired, so there is nothing to resolve
                 return;
             }
-            e.State = AlertState.Resolved;
-            e.ResolvedAt = at;
-            e.Message = Truncate($"{e.Message} — resolved: {reason}");
+            e.Resolve(at, reason);
             resolved++;
         }
 
@@ -100,16 +94,16 @@ public sealed class AlertEvaluator(IAlertsRepository alerts, IDatasetRepository 
 
             if (AlertOperators.Compare(value.Value, rule.Operator, rule.Threshold))
             {
-                var message = Truncate(ViolationMessage(row.Label, rule, value.Value, isBool));
+                var message = AlertEvent.CapMessage(ViolationMessage(row.Label, rule, value.Value, isBool));
                 if (current is null)
                 {
                     var state = rule.ForMinutes <= 0 ? AlertState.Firing : AlertState.Pending;
-                    await alerts.AddEventAsync(new AlertEvent
+                    db.AlertEvents.Add(new AlertEvent
                     {
                         RuleId = rule.Id, AgentId = rule.AgentId, EntityKey = row.EntityKey, EntityLabel = row.Label,
                         State = state, Value = value.Value, Message = message,
                         FirstSeen = row.Ts, LastSeen = row.Ts, FiredAt = state == AlertState.Firing ? row.Ts : null
-                    }, ct);
+                    });
                     if (state == AlertState.Firing) fired++;
                     continue;
                 }
@@ -136,7 +130,7 @@ public sealed class AlertEvaluator(IAlertsRepository alerts, IDatasetRepository 
                 }
                 current.State = AlertState.Resolved;
                 current.ResolvedAt = row.Ts;
-                current.Message = Truncate($"{row.Label}: {rule.Field} is back to normal ({Format(value.Value, isBool)})");
+                current.Message = AlertEvent.CapMessage($"{row.Label}: {rule.Field} is back to normal ({Format(value.Value, isBool)})");
                 resolved++;
             }
         }
@@ -163,17 +157,20 @@ public sealed class AlertEvaluator(IAlertsRepository alerts, IDatasetRepository 
             if (reason is not null) Close(e, now, reason);
         }
 
-        await alerts.SaveEventsAsync(drop, ct);
+        db.AlertEvents.RemoveRange(drop);
+        await db.SaveChangesAsync(ct);
         return (fired, resolved);
     }
 
-    private static string ViolationMessage(string label, AlertRule rule, double value, bool isBool) =>
-        isBool
+    private static string ViolationMessage(string label, AlertRule rule, double value, bool isBool)
+    {
+        return isBool
             ? $"{label}: {rule.Field} is {Format(value, true)}"
             : $"{label}: {rule.Field} is {Format(value, false)} ({AlertOperators.Symbol(rule.Operator)} {Format(rule.Threshold, false)})";
+    }
 
-    private static string Format(double value, bool isBool) =>
-        isBool ? (value >= 1 ? "true" : "false") : Math.Round(value, 1).ToString(CultureInfo.InvariantCulture);
-
-    private static string Truncate(string text) => AlertsRepository.Truncate(text);
+    private static string Format(double value, bool isBool)
+    {
+        return isBool ? (value >= 1 ? "true" : "false") : Math.Round(value, 1).ToString(CultureInfo.InvariantCulture);
+    }
 }

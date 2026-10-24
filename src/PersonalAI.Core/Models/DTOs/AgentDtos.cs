@@ -36,7 +36,8 @@ public record AgentScheduleFields(
     string? CronExpression,
     bool Enabled);
 
-public record CreateAgentRequest(
+/// <summary>The body of both creating and editing an agent.</summary>
+public record SaveAgentRequest(
     string Name,
     string? Description,
     string Prompt,
@@ -52,27 +53,9 @@ public record CreateAgentRequest(
     string? CronExpression,
     bool Enabled,
     string? ReasoningEffort = null,
-    AgentType Type = AgentType.General,
-    JsonElement? TypeConfig = null);
-
-public record UpdateAgentRequest(
-    string Name,
-    string? Description,
-    string Prompt,
-    string? ProviderKey,
-    string ModelName,
-    int? NumCtx,
-    IReadOnlyList<Guid>? EnabledSkillIds,
-    IReadOnlyList<string>? EnabledTools,
-    int? MaxLlmCalls,
-    AgentScheduleKind ScheduleKind,
-    DateTimeOffset? ScheduleOnceAt,
-    int? IntervalMinutes,
-    string? CronExpression,
-    bool Enabled,
-    string? ReasoningEffort = null,
-    // Null means "leave the agent's type alone": a client that predates agent types, or one that simply doesn't send
-    // them, must not silently turn a Dashboard & Alerts agent into a General one and wipe its settings.
+    // Null creates a General agent. On edit it means "leave the agent's type alone": a client that predates agent
+    // types, or one that simply doesn't send them, must not silently turn a Dashboard & Alerts agent into a General one
+    // and wipe its settings.
     AgentType? Type = null,
     JsonElement? TypeConfig = null);
 

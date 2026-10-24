@@ -10,5 +10,8 @@ public sealed class GeneralAgentTypeDescriptor : IAgentTypeDescriptor
     public string? SystemPromptPreamble => null;
     public IReadOnlyList<string> RequiredTools => [];
 
-    public (string? NormalizedJson, string? Error) NormalizeConfig(string? typeConfigJson) => ("{}", null);
+    public (string? NormalizedJson, string? Error) NormalizeConfig(string? typeConfigJson)
+    {
+        return ("{}", null);
+    }
 }

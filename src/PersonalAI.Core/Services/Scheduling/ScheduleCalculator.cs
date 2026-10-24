@@ -13,17 +13,20 @@ public static class ScheduleCalculator
 {
     /// <summary>Returns an error message if the agent's schedule fields are inconsistent with its
     /// ScheduleKind, or null if they're valid.</summary>
-    public static string? Validate(AgentEntity agent) => agent.ScheduleKind switch
+    public static string? Validate(AgentEntity agent)
     {
-        AgentScheduleKind.Manual => null,
-        AgentScheduleKind.Once when agent.ScheduleOnceAt is null => "ScheduleOnceAt is required for a Once schedule.",
-        AgentScheduleKind.Once => null,
-        AgentScheduleKind.Interval when agent.IntervalMinutes is null or < 1 => "IntervalMinutes must be at least 1 for an Interval schedule.",
-        AgentScheduleKind.Interval => null,
-        AgentScheduleKind.Cron when string.IsNullOrWhiteSpace(agent.CronExpression) => "CronExpression is required for a Cron schedule.",
-        AgentScheduleKind.Cron => ValidateCron(agent.CronExpression!),
-        _ => "Unknown schedule kind."
-    };
+        return agent.ScheduleKind switch
+        {
+            AgentScheduleKind.Manual => null,
+            AgentScheduleKind.Once when agent.ScheduleOnceAt is null => "ScheduleOnceAt is required for a Once schedule.",
+            AgentScheduleKind.Once => null,
+            AgentScheduleKind.Interval when agent.IntervalMinutes is null or < 1 => "IntervalMinutes must be at least 1 for an Interval schedule.",
+            AgentScheduleKind.Interval => null,
+            AgentScheduleKind.Cron when string.IsNullOrWhiteSpace(agent.CronExpression) => "CronExpression is required for a Cron schedule.",
+            AgentScheduleKind.Cron => ValidateCron(agent.CronExpression!),
+            _ => "Unknown schedule kind."
+        };
+    }
 
     private static string? ValidateCron(string expression)
     {

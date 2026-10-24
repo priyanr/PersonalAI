@@ -22,5 +22,8 @@ public interface IAgentTypeDescriptor
 
     /// <summary>The tools this particular agent gets from its type: the required ones, plus any that depend on its type
     /// settings (a Dashboard &amp; Alerts agent gets one tool per data source it is scoped to).</summary>
-    IReadOnlyList<string> ToolsFor(string? typeConfigJson) => RequiredTools;
+    IReadOnlyList<string> ToolsFor(string? typeConfigJson)
+    {
+        return RequiredTools;
+    }
 }

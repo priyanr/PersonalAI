@@ -32,7 +32,10 @@ public sealed class ToolRegistry
 
     public IReadOnlyList<ITool> All => [.. _tools.Values];
 
-    public bool TryGet(string name, out ITool tool) => _tools.TryGetValue(name, out tool!);
+    public bool TryGet(string name, out ITool tool)
+    {
+        return _tools.TryGetValue(name, out tool!);
+    }
 
     public static ToolRegistry CreateDefault(
         Workspace workspace, ISearchProvider searchProvider, AppSettingsCache appSettings,
@@ -43,7 +46,9 @@ public sealed class ToolRegistry
         IScreenCaptureService screenCaptureService, IUiaElementScanner uiaElementScanner,
         ISandboxHostClient sandboxHostClient, IOptions<SandboxSettings> sandboxSettings,
         ISandboxHostPowerSignaler sandboxHostPowerSignaler, TimeProvider timeProvider,
-        IEnumerable<ITool>? additionalTools = null) => new(
+        IEnumerable<ITool>? additionalTools = null)
+    {
+        return new(
     [
         new WebSearchTool(searchProvider, appSettings),
         new ReadFileTool(workspace),
@@ -58,4 +63,5 @@ public sealed class ToolRegistry
         new SandboxTool(sandboxHostClient, sandboxSettings, toolConfigCache, serviceScopeFactory, sandboxHostPowerSignaler, timeProvider),
         .. additionalTools ?? []
     ]);
+    }
 }

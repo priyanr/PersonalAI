@@ -8,6 +8,8 @@ public sealed class AgentTypeRegistry(IEnumerable<IAgentTypeDescriptor> descript
 
     public IReadOnlyCollection<IAgentTypeDescriptor> All => _byType.Values;
 
-    public IAgentTypeDescriptor Get(AgentType type) =>
-        _byType.TryGetValue(type, out var d) ? d : throw new InvalidOperationException($"No descriptor registered for agent type {type}.");
+    public IAgentTypeDescriptor Get(AgentType type)
+    {
+        return _byType.TryGetValue(type, out var d) ? d : throw new InvalidOperationException($"No descriptor registered for agent type {type}.");
+    }
 }

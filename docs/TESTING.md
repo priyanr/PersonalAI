@@ -52,7 +52,7 @@ Tests are organized under `tests/PersonalAI.Tests/` by subsystem:
 - **Scheduled agents**: cron/interval schedule computation, `NextRunAt` lookup, poll-based trigger
 - **Run history**: each run recorded with transcript (assistant text + skill invocations)
 
-### Secrets Vault (`SecretsRepositoryTests`, `SecretsCacheTests`)
+### Secrets Vault (`SecretsServiceTests`, `SecretsRepositoryTests`)
 
 - **Create/read/update/delete**: CRUD operations on key/value pairs
 - **No echo-back**: `GET /api/secrets` returns keys only, never values (only `HasValue` flag)

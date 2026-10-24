@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 namespace PersonalAI.Core.Services.Tools;
 
 /// <summary>In-memory mirror of ToolConfig, kept in sync with the DB by the startup load and by
-/// ToolsController/GmailOAuthController/GmailTool after every update, so tools can read their
+/// ToolConfigService after every update, so tools can read their
 /// configuration (including hidden fields like OAuth tokens) synchronously on the hot path without a
 /// DB round-trip per call. Mirrors AIProviderConfigCache.</summary>
 public sealed class ToolConfigCache
@@ -11,10 +11,12 @@ public sealed class ToolConfigCache
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string?>> _tools =
         new(StringComparer.OrdinalIgnoreCase);
 
-    public string? GetValue(string toolName, string fieldName) =>
-        _tools.TryGetValue(toolName, out var fields) && fields.TryGetValue(fieldName, out var value)
+    public string? GetValue(string toolName, string fieldName)
+    {
+        return _tools.TryGetValue(toolName, out var fields) && fields.TryGetValue(fieldName, out var value)
             ? value
             : null;
+    }
 
     public void SetTool(string toolName, IReadOnlyDictionary<string, string?> values)
     {

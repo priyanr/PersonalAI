@@ -22,10 +22,12 @@ public class ChatAgentServiceTests
 
     private static ChatAgentService CreateService(
         AppDbContext db, FakeAIProvider ollama, ToolRegistry tools, AgentSettings? agentSettings = null,
-        FakeSkillExecutionService? skillExecution = null) => new(
+        FakeSkillProvider? skillProvider = null) => new(
+        db,
         new ChatSessionRepository(db),
         new SkillsRepository(db),
-        skillExecution ?? new FakeSkillExecutionService((_, _) => []),
+        (skillProvider ?? new FakeSkillProvider()).CreateService(db),
+        new ChatHistoryCompaction(db, new AIProviderRegistry([(IAIProvider)ollama]), Options.Create(agentSettings ?? new AgentSettings { MaxIterations = 25 })),
         new AIProviderRegistry([(IAIProvider)ollama]),
         tools,
         Options.Create(new OllamaSettings { BaseUrl = "http://localhost:11434", DefaultSystemPrompt = "system" }),
@@ -37,7 +39,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider([
             new AiChatChunk("Hello", null, false),
@@ -63,7 +65,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "test_tool", "{}")], true)],
@@ -93,9 +95,9 @@ public class ChatAgentServiceTests
         // repaired before the next turn's request goes out.
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Assistant,
@@ -106,7 +108,7 @@ public class ChatAgentServiceTests
                 new("call2", "test_tool", "{}")
             })
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Tool,
@@ -138,7 +140,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gated_tool", "{}")], true)]);
@@ -164,7 +166,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gated_tool", "{}")], true)],
@@ -197,7 +199,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gated_tool", "{}")], true)],
@@ -225,7 +227,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
         [
@@ -261,7 +263,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, toolsEnabled: false);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, toolsEnabled: false);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var tools = new ToolRegistry([new FakeTool("test_tool", (_, _) => new ToolCompleted("result"))]);
@@ -281,7 +283,7 @@ public class ChatAgentServiceTests
             WebSearchEnabled: false, ReadFileEnabled: true, WriteFileEnabled: true,
             EditFileEnabled: true, ListFilesEnabled: true, SearchFilesEnabled: true, NetworkScanEnabled: false,
             HttpRequestEnabled: true, ComputerControlEnabled: false, SandboxEnabled: false);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var tools = new ToolRegistry([
@@ -304,7 +306,7 @@ public class ChatAgentServiceTests
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
         var toolFlags = ToolFlags.Default with { GmailEnabled = gmailEnabled };
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var tools = new ToolRegistry([
@@ -335,7 +337,7 @@ public class ChatAgentServiceTests
             WebSearchEnabled: false, ReadFileEnabled: true, WriteFileEnabled: true,
             EditFileEnabled: true, ListFilesEnabled: true, SearchFilesEnabled: true, NetworkScanEnabled: false,
             HttpRequestEnabled: true, ComputerControlEnabled: false, SandboxEnabled: false);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, toolFlags: toolFlags);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "web_search", "{}")], true)],
@@ -358,7 +360,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, numCtx: 8192);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, numCtx: 8192);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var service = CreateService(db, ollama, new ToolRegistry([]));
@@ -374,7 +376,7 @@ public class ChatAgentServiceTests
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
         // Global default is 25, but this session's own MaxLlmCalls of 2 should win.
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, maxLlmCalls: 2);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, maxLlmCalls: 2);
 
         var responses = Enumerable.Range(0, 2)
             .Select(_ => (IReadOnlyList<AiChatChunk>)[new AiChatChunk("", [new AiToolCall("call1", "test_tool", "{}")], true)])
@@ -396,7 +398,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "test_tool", "{}")], true)],
@@ -416,7 +418,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "test_tool", "{}")], true, new AiTokenUsage(10, 5))],
@@ -439,7 +441,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var service = CreateService(db, ollama, new ToolRegistry([]));
@@ -456,7 +458,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, maxLlmCalls: 5);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, maxLlmCalls: 5);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var service = CreateService(db, ollama, new ToolRegistry([]));
@@ -472,23 +474,23 @@ public class ChatAgentServiceTests
     public async Task RunTurnAsync_EnabledSkill_IsAdvertisedAndInvokedAsToolCall()
     {
         await using var db = NewContext();
-        var skill = await new SkillsRepository(db).CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "Weather digest", "Summarizes the weather", "prompt", "ollama", "m", null, [], [], CancellationToken.None);
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, enabledSkillIds: [skill.Id]);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, enabledSkillIds: [skill.Id]);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather_digest", """{"input":"today"}""")], true)],
             [new AiChatChunk("It is sunny.", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("Sunny, 24C."), new DoneEvent()]);
-        var service = CreateService(db, ollama, new ToolRegistry([]), skillExecution: skillExecution);
+        var skillProvider = new FakeSkillProvider("Sunny, 24C.");
+        var service = CreateService(db, ollama, new ToolRegistry([]), skillProvider: skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunTurnAsync(session.Id, "Weather?", CancellationToken.None))
             events.Add(e);
 
         ollama.RecordedToolSets[0].Should().ContainSingle(t => t.Name == "skill_weather_digest");
-        skillExecution.Calls.Should().ContainSingle(c => c.SkillId == skill.Id && c.Input == "today");
+        skillProvider.Inputs.Should().Equal("today");
         events.OfType<ToolResultEvent>().Should().ContainSingle(e => !e.IsError && e.ResultContent == "Sunny, 24C.");
         events.Should().ContainSingle(e => e is DoneEvent);
     }
@@ -497,23 +499,23 @@ public class ChatAgentServiceTests
     public async Task RunTurnAsync_SkillNotEnabledForSession_IsNotAdvertisedOrCallable()
     {
         await using var db = NewContext();
-        var skill = await new SkillsRepository(db).CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "Weather digest", null, "prompt", "ollama", "m", null, [], [], CancellationToken.None);
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather_digest", "{}")], true)],
             [new AiChatChunk("ok", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("x"), new DoneEvent()]);
-        var service = CreateService(db, ollama, new ToolRegistry([]), skillExecution: skillExecution);
+        var skillProvider = new FakeSkillProvider("x");
+        var service = CreateService(db, ollama, new ToolRegistry([]), skillProvider: skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunTurnAsync(session.Id, "Weather?", CancellationToken.None))
             events.Add(e);
 
         ollama.RecordedToolSets[0].Should().NotContain(t => t.Name == "skill_weather_digest");
-        skillExecution.Calls.Should().BeEmpty();
+        skillProvider.Inputs.Should().BeEmpty();
         events.OfType<ToolResultEvent>().Should().ContainSingle(e => e.IsError);
     }
 
@@ -522,7 +524,7 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "test_tool", "{}")], true)],
@@ -545,11 +547,11 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         for (var i = 0; i < 6; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.User,
@@ -583,11 +585,11 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         for (var i = 0; i < 4; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.User,
@@ -627,11 +629,11 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         for (var i = 0; i < 10; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.User,
@@ -665,13 +667,13 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         // Simulates a handful of large sandbox-style tool outputs: few messages, but already over the
         // char budget well before CompactionBatchSize's message count would ever be reached.
         for (var i = 0; i < 5; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.Tool,
@@ -701,11 +703,11 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         for (var i = 0; i < 6; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.User,
@@ -741,21 +743,21 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         // The oldest pending message (seq 1) alone almost fills the char budget; its own tool result
         // (seq 2) can't also fit under the same budget. Before the fix, SafeFoldBoundary shrank the fold
         // back to 0 rather than orphan the tool result, deferring the pass forever — since "pending" is
         // rescanned from the same starting point every turn and nothing ages these two messages out, the
         // session would never compact again.
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Assistant,
             Content = new string('a', 90),
             ToolCallsJson = System.Text.Json.JsonSerializer.Serialize(new List<AiToolCall> { new("call1", "test_tool", "{}") })
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Tool,
@@ -788,15 +790,15 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.User,
             Content = "please write notes.txt"
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Assistant,
@@ -806,7 +808,7 @@ public class ChatAgentServiceTests
                 new("call1", "write_file", """{"path":"notes.txt","content":"hi"}""")
             })
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Tool,
@@ -814,7 +816,7 @@ public class ChatAgentServiceTests
             ToolName = "write_file",
             Content = "Wrote 2 bytes to notes.txt"
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+        await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.User,
@@ -846,11 +848,11 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: true);
 
         for (var i = 0; i < 6; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = session.Id,
                 Role = MessageRole.User,
@@ -875,11 +877,11 @@ public class ChatAgentServiceTests
         ollama.RecordedRequests.Should().HaveCount(3);
     }
 
-    private static async Task AppendUserMessagesAsync(ChatSessionRepository repo, Guid sessionId, int count)
+    private static async Task AppendUserMessagesAsync(AppDbContext db, Guid sessionId, int count)
     {
         for (var i = 0; i < count; i++)
         {
-            await repo.AppendMessageAsync(new PersonalAI.Core.Models.Entities.ChatMessage
+            await TestSeed.MessageAsync(db, new PersonalAI.Core.Models.Entities.ChatMessage
             {
                 SessionId = sessionId,
                 Role = MessageRole.User,
@@ -894,8 +896,8 @@ public class ChatAgentServiceTests
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
         // Auto-compaction off: a manual summary must still be used.
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: false);
-        await AppendUserMessagesAsync(repo, session.Id, 3);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None, trimHistoryEnabled: false);
+        await AppendUserMessagesAsync(db, session.Id, 3);
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("Summary: three old messages.", null, true)],
@@ -934,8 +936,8 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-        await AppendUserMessagesAsync(repo, session.Id, 4); // 13 chars each
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
+        await AppendUserMessagesAsync(db, session.Id, 4); // 13 chars each
 
         var ollama = new FakeAIProvider(
             [new AiChatChunk("Summary v1.", null, true)],
@@ -961,8 +963,8 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-        await AppendUserMessagesAsync(repo, session.Id, 2);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
+        await AppendUserMessagesAsync(db, session.Id, 2);
 
         var ollama = new FakeAIProvider([new AiChatChunk("Summary.", null, true)]);
         var service = CreateService(db, ollama, new ToolRegistry([]));
@@ -984,8 +986,8 @@ public class ChatAgentServiceTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-        await AppendUserMessagesAsync(repo, session.Id, 2);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
+        await AppendUserMessagesAsync(db, session.Id, 2);
 
         var ollama = new FakeAIProvider([new AiChatChunk("unused", null, true)])
         {

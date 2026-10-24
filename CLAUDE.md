@@ -89,7 +89,7 @@ See [Configuration](docs/CONFIGURATION.md#database-schema) for the complete enti
 dotnet test PersonalAI.slnx
 ```
 
-638 tests across Agent, Controllers, Infrastructure, Services, Tools, and Sandbox subsystems.
+About 1080 tests across Agent, Controllers, Infrastructure, Services, Tools, and Sandbox subsystems.
 
 ## Key Design Decisions
 

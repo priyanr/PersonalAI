@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using PersonalAI.Api.Controllers;
 using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Models;
 using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Entities.Enums;
@@ -44,19 +45,19 @@ public class SshSecretRestrictionTests
         SshSecrets.IsAllowed(name).Should().Be(expected);
 
     [Fact]
-    public async Task Controller_RejectsAServerThatNamesAnUnrelatedSecret_EvenThoughItExists()
+    public async Task Service_RejectsAServerThatNamesAnUnrelatedSecret_EvenThoughItExists()
     {
         await using var db = NewDb();
         var repo = new SshServersRepository(db);
-        var group = await repo.CreateGroupAsync("g", null, default);
-        await new SecretsRepository(db).CreateAsync("OPENAI_API_KEY", "sk-secret", default);
-        var controller = new SshServersController(repo, new SecretsRepository(db), new SshConnectionService(repo, new NeverCalledSsh()));
+        var group = await TestSeed.SshGroupAsync(db, "g", null, default);
+        db.Secrets.Add(new Secret { Key = "OPENAI_API_KEY", Value = "sk-secret" });
+        await db.SaveChangesAsync();
+        var service = new SshServersService(db, repo, new SecretsRepository(db), new NeverCalledSsh());
 
-        var response = await controller.CreateServer(
+        var act = () => service.CreateServer(
             new SaveSshServerRequest(group.Id, "evil", "attacker.example.com", 22, "root", "OPENAI_API_KEY"), default);
 
-        var bad = response.Result.Should().BeOfType<BadRequestObjectResult>().Subject;
-        bad.Value!.ToString().Should().Contain("can't be used for SSH").And.Contain("SSH_");
+        (await act.Should().ThrowAsync<InvalidRequestException>()).Which.Message.Should().Contain("can't be used for SSH").And.Contain("SSH_");
         (await repo.GetServersAsync(null, default)).Should().BeEmpty();
     }
 
@@ -64,7 +65,8 @@ public class SshSecretRestrictionTests
     public async Task Runner_NeverSendsANonSshSecret_EvenForAnAlreadyStoredServer()
     {
         await using var db = NewDb();
-        await new SecretsRepository(db).CreateAsync("OPENAI_API_KEY", "sk-secret", default);
+        db.Secrets.Add(new Secret { Key = "OPENAI_API_KEY", Value = "sk-secret" });
+        await db.SaveChangesAsync();
         var server = new SshServer { Name = "t", Address = "127.0.0.1", Port = 1, Username = "root", SecretRef = "OPENAI_API_KEY" };
 
         var result = await new SshNetRunner(new SecretsRepository(db)).RunAsync(server, "uname", TimeSpan.FromSeconds(1), default);
@@ -82,6 +84,8 @@ public class DashboardStalenessAndSeriesTests
         var name = Guid.NewGuid().ToString();
         services.AddDbContext<AppDbContext>(o => o.UseInMemoryDatabase(name));
         services.AddScoped<IDatasetRepository, DatasetRepository>();
+        services.AddScoped<IAgentsRepository, AgentsRepository>();
+        services.AddScoped<DatasetService>();
         return (services.BuildServiceProvider(), Guid.NewGuid());
     }
 
@@ -93,7 +97,7 @@ public class DashboardStalenessAndSeriesTests
         await using var scope = p.CreateAsyncScope();
         var (spec, error) = DashboardSpecJson.Parse($$"""{"title":"T","widgets":{{widgetsJson}}}""");
         spec.Should().NotBeNull(error);
-        return await new DashboardDataBuilder(scope.ServiceProvider.GetRequiredService<IDatasetRepository>()).BuildAsync(agent, spec!, default);
+        return await new DashboardDataBuilder(scope.ServiceProvider.GetRequiredService<IDatasetRepository>(), TimeProvider.System, null).BuildAsync(agent, spec!, default);
     }
 
     [Fact]
@@ -102,7 +106,7 @@ public class DashboardStalenessAndSeriesTests
         var (p, agent) = Build();
         var now = DateTime.UtcNow;
         await using (var scope = p.CreateAsyncScope())
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
             [
                 P("container", "t|web", now.AddMinutes(-1), new { target = "web-1", name = "web", state = "running", running = true }, DatasetKind.Snapshot),
                 P("container", "t|removed", now.AddHours(-3), new { target = "web-1", name = "removed", state = "running", running = true }, DatasetKind.Snapshot)
@@ -126,7 +130,7 @@ public class DashboardStalenessAndSeriesTests
     {
         var (p, agent) = Build();
         await using (var scope = p.CreateAsyncScope())
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
                 [P("system", "a", DateTime.UtcNow.AddDays(-2), new { target = "web-1", cpuPercent = 99.0 })], default);
 
         var data = await BuildAsync(p, agent, """[{"id":"s","type":"stat","query":{"dataset":"system","field":"cpuPercent"}}]""");
@@ -140,7 +144,7 @@ public class DashboardStalenessAndSeriesTests
         var (p, agent) = Build();
         var now = DateTime.UtcNow;
         await using (var scope = p.CreateAsyncScope())
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
                 [.. Enumerable.Range(0, 6).Select(i => P("system", "a", now.AddMinutes(-240 + i * 5), new { target = "gone", cpuPercent = 30.0 + i }))], default);
 
         var data = await BuildAsync(p, agent, """[{"id":"c","type":"timeseries","query":{"dataset":"system","field":"cpuPercent","windowMinutes":360}}]""");
@@ -154,7 +158,7 @@ public class DashboardStalenessAndSeriesTests
         var (p, agent) = Build();
         var now = DateTime.UtcNow;
         await using (var scope = p.CreateAsyncScope())
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
             [
                 P("system", "up", now.AddMinutes(-10), new { target = "up", cpuPercent = 10.0 }),
                 P("system", "up", now, new { target = "up", cpuPercent = 12.0 }),
@@ -180,7 +184,7 @@ public class DashboardStalenessAndSeriesTests
             foreach (var server in new[] { "a", "b" })
                 for (var i = 0; i < 7 * 24 * 60; i++)
                     points.Add(P("system", server, now.AddMinutes(-(7 * 24 * 60) + i + 1), new { target = server, cpuPercent = 10.0 + (i % 7) }));
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent, points, default);
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent, points, default);
         }
 
         var data = await BuildAsync(p, agent, """[{"id":"c","type":"timeseries","query":{"dataset":"system","field":"cpuPercent","windowMinutes":10080,"bucketMinutes":180}}]""");
@@ -198,7 +202,7 @@ public class DashboardStalenessAndSeriesTests
         var (p, agent) = Build();
         var now = DateTime.UtcNow;
         await using (var scope = p.CreateAsyncScope())
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
                 [.. Enumerable.Range(1, 12).Select(i => P("system", $"s{i}", now, new { target = $"s{i:00}", cpuPercent = (double)i }))], default);
 
         var data = await BuildAsync(p, agent, """[{"id":"c","type":"timeseries","query":{"dataset":"system","field":"cpuPercent","windowMinutes":30}}]""");
@@ -257,7 +261,7 @@ public class AlertLifecycleFixTests
         await f.Rule();
         await f.Sample("web-1", T0, 95);
         await f.Eval(T0);
-        await f.S.GetRequiredService<IDatasetRepository>().AddPointsAsync(f.AgentId,
+        await f.S.GetRequiredService<DatasetService>().AddPointsAsync(f.AgentId,
             [new("system", DatasetKind.Timeseries, "web-1", T0.AddMinutes(5), JsonSerializer.Serialize(new { target = "web-1", reachable = false }))], default);
 
         (await f.Eval(T0.AddMinutes(5))).Resolved.Should().Be(1);
@@ -276,7 +280,7 @@ public class AlertLifecycleFixTests
 
         var tracked = (await f.Alerts.GetRuleAsync(f.AgentId, rule.Id, default))!;
         tracked.Target = "web-2";
-        await f.Alerts.SaveRuleAsync(tracked, default);
+        await f.S.GetRequiredService<AppDbContext>().SaveChangesAsync();
         await f.Sample("web-1", T0.AddMinutes(5), 95);
         await f.Sample("web-2", T0.AddMinutes(5), 96);
         await f.Eval(T0.AddMinutes(5));
@@ -323,6 +327,7 @@ public class DataQueryScopingTests
         services.AddScoped<IAgentsRepository, AgentsRepository>();
         services.AddScoped<ISshServersRepository, SshServersRepository>();
         services.AddScoped<IDatasetRepository, DatasetRepository>();
+        services.AddScoped<DatasetService>();
         services.AddSingleton<ISshRunner>(new IdleSsh());
         services.AddSingleton(new PersonalAI.Core.Services.Tools.ToolConfigCache());
         services.AddSingleton<SshGuardProvider>();
@@ -333,19 +338,19 @@ public class DataQueryScopingTests
         Guid agentId, ownServerId;
         await using (var scope = provider.CreateAsyncScope())
         {
-            var servers = scope.ServiceProvider.GetRequiredService<ISshServersRepository>();
+            var seedDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
             // The other team's group is created first and also has a "web-1": an arbitrary global name lookup finds it.
-            var other = await servers.CreateGroupAsync("other-team", null, default);
-            await servers.CreateServerAsync(other.Id, "web-1", "10.1.0.1", 22, "root", "SSH_K", true, default);
-            await servers.CreateServerAsync(other.Id, "secret-box", "10.1.0.2", 22, "root", "SSH_K", true, default);
-            var mine = await servers.CreateGroupAsync("mine", null, default);
-            ownServerId = (await servers.CreateServerAsync(mine.Id, "web-1", "10.0.0.1", 22, "root", "SSH_K", true, default))!.Id;
+            var other = await TestSeed.SshGroupAsync(seedDb, "other-team", null, default);
+            await TestSeed.SshServerAsync(seedDb, other.Id, "web-1", "10.1.0.1", 22, "root", "SSH_K", true, default);
+            await TestSeed.SshServerAsync(seedDb, other.Id, "secret-box", "10.1.0.2", 22, "root", "SSH_K", true, default);
+            var mine = await TestSeed.SshGroupAsync(seedDb, "mine", null, default);
+            ownServerId = (await TestSeed.SshServerAsync(seedDb, mine.Id, "web-1", "10.0.0.1", 22, "root", "SSH_K", true, default))!.Id;
 
-            var agent = await scope.ServiceProvider.GetRequiredService<IAgentsRepository>().CreateAsync(
+            var agent = await TestSeed.AgentAsync(scope.ServiceProvider.GetRequiredService<AppDbContext>(), 
                 "mon", null, "p", "ollama", "m", null, [], [], null, AgentScheduleKind.Manual, null, null, null, true, default,
                 null, AgentType.DashboardAlerts, JsonSerializer.Serialize(new { toolScopes = new { ssh = new[] { mine.Id } } }));
             agentId = agent.Id;
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agentId,
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agentId,
                 [new("system", DatasetKind.Timeseries, ownServerId.ToString(), DateTime.UtcNow, JsonSerializer.Serialize(new { target = "web-1", cpuPercent = 42.0 }))], default);
         }
 
@@ -375,11 +380,12 @@ public class AlertQueriesOnSqliteTests
         await using var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseSqlite(conn).Options);
         db.Database.EnsureCreated();
 
-        var agent = await new AgentsRepository(db).CreateAsync("a", null, "p", "ollama", "m", null, [], [], null,
+        var agent = await TestSeed.AgentAsync(db, "a", null, "p", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, default, null, AgentType.DashboardAlerts, "{}");
         var repo = new AlertsRepository(db);
-        var critical = await repo.AddRuleAsync(new AlertRule { AgentId = agent.Id, Name = "crit", Dataset = "d", Field = "f", Operator = "gte", Severity = "critical" }, default);
-        var warning = await repo.AddRuleAsync(new AlertRule { AgentId = agent.Id, Name = "warn", Dataset = "d", Field = "f", Operator = "gte", Severity = "warning" }, default);
+        var critical = new AlertRule { AgentId = agent.Id, Name = "crit", Dataset = "d", Field = "f", Operator = "gte", Severity = "critical" };
+        var warning = new AlertRule { AgentId = agent.Id, Name = "warn", Dataset = "d", Field = "f", Operator = "gte", Severity = "warning" };
+        db.AlertRules.AddRange(critical, warning);
 
         var now = DateTime.UtcNow;
         AlertEvent E(AlertRule r, string key, AlertState state, DateTime at, DateTime? resolved = null, bool ack = false) => new()
@@ -387,12 +393,13 @@ public class AlertQueriesOnSqliteTests
             RuleId = r.Id, AgentId = agent.Id, EntityKey = key, EntityLabel = key, State = state, Message = key,
             FirstSeen = at, FiredAt = at, LastSeen = at, ResolvedAt = resolved, Acknowledged = ack
         };
-        await repo.AddEventAsync(E(critical, "c1", AlertState.Firing, now.AddMinutes(-5)), default);
-        await repo.AddEventAsync(E(critical, "c2", AlertState.Firing, now.AddMinutes(-4), ack: true), default);
-        await repo.AddEventAsync(E(warning, "w1", AlertState.Firing, now.AddMinutes(-3)), default);
-        await repo.AddEventAsync(E(warning, "old", AlertState.Resolved, now.AddDays(-9), now.AddDays(-9)), default);
-        await repo.AddEventAsync(E(warning, "new", AlertState.Resolved, now.AddHours(-2), now.AddHours(-1)), default);
-        await repo.AddEventAsync(E(warning, "p", AlertState.Pending, now), default);
+        db.AlertEvents.Add(E(critical, "c1", AlertState.Firing, now.AddMinutes(-5)));
+        db.AlertEvents.Add(E(critical, "c2", AlertState.Firing, now.AddMinutes(-4), ack: true));
+        db.AlertEvents.Add(E(warning, "w1", AlertState.Firing, now.AddMinutes(-3)));
+        db.AlertEvents.Add(E(warning, "old", AlertState.Resolved, now.AddDays(-9), now.AddDays(-9)));
+        db.AlertEvents.Add(E(warning, "new", AlertState.Resolved, now.AddHours(-2), now.AddHours(-1)));
+        db.AlertEvents.Add(E(warning, "p", AlertState.Pending, now));
+        await db.SaveChangesAsync();
 
         (await repo.GetEventsAsync(null, true, null, default)).Select(e => e.EntityKey).Should().BeEquivalentTo("c1", "c2", "w1");
         (await repo.GetEventsAsync(null, false, now.AddDays(-7), default)).Select(e => e.EntityKey).Should().Equal("new");

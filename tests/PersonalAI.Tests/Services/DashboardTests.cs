@@ -1,3 +1,7 @@
+using PersonalAI.Core.Models.Entities.Enums;
+using PersonalAI.Core.Models;
+using PersonalAI.Core.Services.Monitoring.Collectors;
+using PersonalAI.Core.Services.Agents;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -75,13 +79,21 @@ public class DashboardServiceTests
         services.AddScoped<IDatasetRepository, DatasetRepository>();
         services.AddScoped<IDashboardRepository, DashboardRepository>();
         services.AddScoped<DashboardService>();
-        return (services.BuildServiceProvider(), Guid.NewGuid());
+        services.AddSingleton(TimeProvider.System);
+        services.AddScoped<DatasetService>();
+        services.AddScoped<IAgentsRepository, AgentsRepository>();
+        services.AddScoped<ICollectionJobsRepository, CollectionJobsRepository>();
+        var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var agent = TestSeed.AgentAsync(scope.ServiceProvider.GetRequiredService<AppDbContext>(), "dash", null, "p", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, default, type: AgentType.DashboardAlerts).GetAwaiter().GetResult();
+        return (provider, agent.Id);
     }
 
     private static async Task SeedAsync(ServiceProvider provider, Guid agentId)
     {
         await using var scope = provider.CreateAsyncScope();
-        var repo = scope.ServiceProvider.GetRequiredService<IDatasetRepository>();
+        var repo = scope.ServiceProvider.GetRequiredService<DatasetService>();
         var now = DateTime.UtcNow;
         var points = new List<NewDataPoint>();
         foreach (var (target, cpu, up) in new[] { ("web-1", 20.0, true), ("web-2", 95.0, true), ("db-1", 50.0, false) })
@@ -134,7 +146,7 @@ public class DashboardServiceTests
     {
         var (provider, agent) = Build();
         await using var scope = provider.CreateAsyncScope();
-        await scope.ServiceProvider.GetRequiredService<IDatasetRepository>()
+        await scope.ServiceProvider.GetRequiredService<DatasetService>()
             .EnsureDatasetsAsync(agent, new List<DatasetDefinition> { new("system", DatasetKind.Timeseries, null) }, default);
 
         var v = await scope.ServiceProvider.GetRequiredService<DashboardService>()
@@ -154,19 +166,19 @@ public class DashboardServiceTests
         (await service.GetCurrentAsync(agent, default)).Should().BeNull();
         (await service.SaveAsync(agent, Spec("one"), "first", null, default)).Should().Be(1);
         (await service.SaveAsync(agent, Spec("two"), "second", null, default)).Should().Be(2);
-        var restored = await service.RestoreAsync(agent, 1, default);
+        var restored = await service.Restore(agent, 1, default);
 
-        restored.Should().Be(3);
+        restored.Version.Should().Be(3);
         (await service.GetCurrentAsync(agent, default))!.SpecJson.Should().Contain("one");
-        (await service.ListVersionsAsync(agent, default)).Select(v => v.Version).Should().Equal(3, 2, 1);
-        (await service.ListVersionsAsync(agent, default))[0].Reason.Should().Be("Restored v1");
-        (await service.RestoreAsync(agent, 99, default)).Should().BeNull();
+        (await service.GetVersions(agent, default)).Select(v => v.Version).Should().Equal(3, 2, 1);
+        (await service.GetVersions(agent, default))[0].Reason.Should().Be("Restored v1");
+        await FluentActions.Awaiting(() => service.Restore(agent, 99, default)).Should().ThrowAsync<NotFoundException>();
 
-        for (var i = 0; i < IDashboardRepository.KeepVersions; i++)
+        for (var i = 0; i < DashboardService.KeepVersions; i++)
             await service.SaveAsync(agent, Spec($"v{i}"), null, null, default);
-        var versions = await service.ListVersionsAsync(agent, default);
-        versions.Should().HaveCount(IDashboardRepository.KeepVersions);
-        versions[0].Version.Should().Be(3 + IDashboardRepository.KeepVersions);
+        var versions = await service.GetVersions(agent, default);
+        versions.Should().HaveCount(DashboardService.KeepVersions);
+        versions[0].Version.Should().Be(3 + DashboardService.KeepVersions);
     }
 
     [Fact]
@@ -259,7 +271,7 @@ public class DashboardServiceTests
         {
             var extra = Enumerable.Range(1, 8).Select(i => new NewDataPoint("system", DatasetKind.Timeseries, $"x{i}", DateTime.UtcNow,
                 JsonSerializer.Serialize(new { target = $"x{i}", reachable = true, cpuPercent = (double)i }))).ToList();
-            await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent, extra, default);
+            await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent, extra, default);
         }
 
         var data = await DataAsync(provider, agent, """
@@ -280,7 +292,7 @@ public class DashboardServiceTests
         var (provider, agent) = Build();
         await SeedAsync(provider, agent);
         await using var scope = provider.CreateAsyncScope();
-        var builder = new DashboardDataBuilder(scope.ServiceProvider.GetRequiredService<IDatasetRepository>());
+        var builder = new DashboardDataBuilder(scope.ServiceProvider.GetRequiredService<IDatasetRepository>(), TimeProvider.System, null);
         var spec = new DashboardSpec("T", null, null,
         [
             new("bad", "stat", null, null, new("gone", "x", null, null, null, null, null), null, null),

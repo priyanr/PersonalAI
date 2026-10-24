@@ -1,3 +1,4 @@
+using PersonalAI.Core.Infrastructure;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
@@ -328,8 +329,8 @@ public class SshDataSourceTests
 
         (await source.ResolveAsync([groupId], default)).Select(c => c.Name).Should().Equal("web-1"); // "off" is disabled
 
-        var servers = scope.ServiceProvider.GetRequiredService<ISshServersRepository>();
-        await servers.CreateServerAsync(groupId, "web-2", "10.0.0.7", 22, "root", "SSH_K", true, default); // added later
+        var seedDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await TestSeed.SshServerAsync(seedDb, groupId, "web-2", "10.0.0.7", 22, "root", "SSH_K", true, default); // added later
         (await source.ResolveAsync([groupId], default)).Select(c => c.Name).Should().BeEquivalentTo("web-1", "web-2");
         (await source.ResolveAsync([Guid.NewGuid()], default)).Should().BeEmpty();
     }

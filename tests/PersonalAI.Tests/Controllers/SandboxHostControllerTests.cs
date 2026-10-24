@@ -20,7 +20,7 @@ namespace PersonalAI.Tests.Controllers;
 
 public class SandboxHostControllerTests
 {
-    private static (SandboxHostController Controller, ISandboxRepository Repository, SandboxHostRegistry Registry) CreateControllerWithDeps(
+    private static (SandboxHostController Controller, AppDbContext Db, SandboxHostRegistry Registry) CreateControllerWithDeps(
         SandboxSettings settings, string? presentedHostKey)
     {
         var services = new ServiceCollection();
@@ -33,7 +33,8 @@ public class SandboxHostControllerTests
             new FakeTimeProvider(DateTimeOffset.UtcNow), Mock.Of<ILogger<SandboxHostRegistry>>());
 
         var repo = provider.GetRequiredService<ISandboxRepository>();
-        var provisioning = new SandboxProvisioningService(registry, repo);
+        var db = provider.GetRequiredService<AppDbContext>();
+        var provisioning = new SandboxProvisioningService(db, registry, repo);
         var controller = new SandboxHostController(registry, repo, provisioning, Options.Create(settings));
 
         var httpContext = new DefaultHttpContext();
@@ -41,7 +42,7 @@ public class SandboxHostControllerTests
             httpContext.Request.Headers["X-Sandbox-Host-Key"] = presentedHostKey;
         controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
 
-        return (controller, repo, registry);
+        return (controller, db, registry);
     }
 
     private static SandboxHostController CreateController(SandboxSettings settings, string? presentedHostKey) =>
@@ -161,13 +162,13 @@ public class SandboxHostControllerTests
     [Fact]
     public async Task OwnerStatus_BrokerConnectedAndSessionSandboxExists_ReturnsCanBrowseTrue()
     {
-        var (controller, repo, registry) = CreateControllerWithDeps(ValidSettings(), presentedHostKey: null);
+        var (controller, db, registry) = CreateControllerWithDeps(ValidSettings(), presentedHostKey: null);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         ConnectBroker(registry, cts.Token);
         await WaitUntilAsync(() => registry.IsConnected);
 
         var ownerId = Guid.NewGuid();
-        await repo.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -186,13 +187,13 @@ public class SandboxHostControllerTests
     [Fact]
     public async Task OwnerStatus_EphemeralSandboxDestroyed_ReturnsCanBrowseFalse()
     {
-        var (controller, repo, registry) = CreateControllerWithDeps(ValidSettings(), presentedHostKey: null);
+        var (controller, db, registry) = CreateControllerWithDeps(ValidSettings(), presentedHostKey: null);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         ConnectBroker(registry, cts.Token);
         await WaitUntilAsync(() => registry.IsConnected);
 
         var ownerId = Guid.NewGuid();
-        await repo.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(db, new SandboxInstance
         {
             Kind = SandboxKind.Ephemeral,
             OwnerId = ownerId,

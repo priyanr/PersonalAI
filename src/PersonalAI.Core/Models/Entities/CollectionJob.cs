@@ -54,4 +54,12 @@ public class CollectionJob
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>Records one run. The error is capped at 1000 characters: it comes from a remote command and is shown in the UI.</summary>
+    public void RecordRun(DateTimeOffset at, int rowCount, string? error)
+    {
+        LastRunAt = at;
+        LastRowCount = rowCount;
+        LastError = error is { Length: > 1000 } ? error[..997] + "..." : error;
+    }
 }

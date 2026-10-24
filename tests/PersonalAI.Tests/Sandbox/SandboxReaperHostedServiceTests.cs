@@ -6,13 +6,13 @@ using Microsoft.Extensions.Options;
 using Moq;
 using PersonalAI.Api.BackgroundServices;
 using PersonalAI.Core.Infrastructure;
-using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Models.Settings;
 using PersonalAI.Core.Services.Sandbox;
 using PersonalAI.Core.Services.Tools;
 using PersonalAI.Sandbox.Protocol;
+using PersonalAI.Core.Services.Sessions;
 
 namespace PersonalAI.Tests.Sandbox;
 

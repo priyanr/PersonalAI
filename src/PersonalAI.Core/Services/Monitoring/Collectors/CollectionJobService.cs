@@ -1,8 +1,11 @@
 using System.Text.Json;
-using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Infrastructure;
+using PersonalAI.Core.Models;
+using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Services.Ssh;
+using PersonalAI.Core.Services.Agents;
 
 namespace PersonalAI.Core.Services.Monitoring.Collectors;
 
@@ -11,8 +14,6 @@ namespace PersonalAI.Core.Services.Monitoring.Collectors;
 public record JobInput(
     string? Name, string? Description, string? Request, int? IntervalMinutes,
     ParserSpec? Parser, DatasetSpec? Dataset, List<string>? Targets, string? Tool = null);
-
-public record ApprovalResult(CollectionJob? Job, string? Error);
 
 public record JobSaveResult(CollectionJob? Job, bool Created, IReadOnlyList<string> Errors)
 {
@@ -27,14 +28,17 @@ public record JobValidation(List<string> Errors, bool OutsideAllowlist);
 /// live here: a request must pass the tool's guard (or, when it merely isn't on the allowed list, be approved by the user
 /// as written), a job the model creates (or changes in a way that alters what
 /// runs) waits for the user's approval when the agent requires it, and a model can only touch jobs it wrote.</summary>
-public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgentsRepository agents, DataSourceRegistry sources)
+public sealed class CollectionJobService(
+    AppDbContext db, ICollectionJobsRepository jobs, IAgentsRepository agents, DataSourceRegistry sources, CollectionRunner runner)
 {
     public const int MaxJobs = 20, MaxName = 100, MinInterval = 1, MaxInterval = 1440, MaxTargets = 20;
 
     // ---- validation ----------------------------------------------------------------
 
-    public async Task<List<string>> ValidateAsync(Guid agentId, JobInput i, CollectionJob? existing, CancellationToken ct) =>
-        (await ValidateDetailedAsync(agentId, i, existing, ct)).Errors;
+    public async Task<List<string>> ValidateAsync(Guid agentId, JobInput i, CollectionJob? existing, CancellationToken ct)
+    {
+        return (await ValidateDetailedAsync(agentId, i, existing, ct)).Errors;
+    }
 
     public async Task<JobValidation> ValidateDetailedAsync(Guid agentId, JobInput i, CollectionJob? existing, CancellationToken ct)
     {
@@ -126,14 +130,16 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
 
         if (existing is null)
         {
-            var created = await jobs.AddAsync(new CollectionJob
+            var created = new CollectionJob
             {
                 AgentId = agentId, Name = input.Name!.Trim(), Description = Clean(input.Description),
                 Tool = (await ResolveToolAsync(agentId, input.Tool, ct)).Tool!,
                 Request = input.Request!.Trim(), IntervalMinutes = interval, ParserJson = parserJson, DatasetJson = datasetJson,
                 TargetsJson = targetsJson, Source = source, OutsideAllowlist = outsideAllowlist,
                 Status = requireApproval ? JobStatus.PendingApproval : JobStatus.Active
-            }, ct);
+            };
+            db.CollectionJobs.Add(created);
+            await db.SaveChangesAsync(ct);
             return new JobSaveResult(created, true, []);
         }
 
@@ -153,7 +159,7 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
         existing.TargetsJson = targetsJson;
         if (changesWhatRuns)
             existing.Status = requireApproval ? JobStatus.PendingApproval : (existing.Status == JobStatus.Disabled ? JobStatus.Disabled : JobStatus.Active);
-        await jobs.SaveAsync(existing, ct);
+        await SaveJobAsync(existing, ct);
         return new JobSaveResult(existing, false, []);
     }
 
@@ -163,7 +169,8 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
         var job = await jobs.GetByNameAsync(agentId, name, ct);
         if (job is null) return $"No job named '{name}'.";
         if (job.Source != source) return $"Job '{job.Name}' was created by the user; you can't delete it.";
-        await jobs.DeleteAsync(agentId, job.Id, ct);
+        db.CollectionJobs.Remove(job);
+        await db.SaveChangesAsync(ct);
         return null;
     }
 
@@ -178,41 +185,73 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
         return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)))[..16].ToLowerInvariant();
     }
 
+    public async Task<List<CollectionJobDto>> GetJobsAsync(Guid agentId, CancellationToken ct)
+    {
+        await EnsureDashboardAgent(agentId, ct);
+        return (await jobs.GetAllAsync(agentId, ct)).Select(ToDto).ToList();
+    }
+
     /// <summary>Approves a pending job so it runs from now on, but only if it is still exactly what the approver was
     /// shown (<paramref name="approvalToken"/>, from the job's DTO).</summary>
-    public async Task<ApprovalResult> ApproveAsync(Guid agentId, Guid jobId, string? approvalToken, CancellationToken ct)
+    public async Task<CollectionJobDto> ApproveAsync(Guid agentId, Guid jobId, string? approvalToken, CancellationToken ct)
     {
-        var job = await jobs.GetAsync(agentId, jobId, ct);
-        if (job is null || job.Status != JobStatus.PendingApproval) return new ApprovalResult(null, "The job is not waiting for approval.");
+        await EnsureDashboardAgent(agentId, ct);
+        if (string.IsNullOrEmpty(approvalToken)) throw new InvalidRequestException("The approval token of the job you reviewed is required.");
 
-        if (string.IsNullOrEmpty(approvalToken) || !string.Equals(approvalToken, ApprovalToken(job), StringComparison.Ordinal))
-            return new ApprovalResult(null, "The job changed since you reviewed it. Reload, read the new request, and approve again.");
+        var job = await jobs.GetAsync(agentId, jobId, ct);
+        if (job is null || job.Status != JobStatus.PendingApproval) throw new ConflictException("The job is not waiting for approval.");
+
+        if (!string.Equals(approvalToken, ApprovalToken(job), StringComparison.Ordinal))
+            throw new ConflictException("The job changed since you reviewed it. Reload, read the new request, and approve again.");
 
         // The request is re-checked at approval: the allowlist may have been tightened since the model proposed it. A job
         // flagged OutsideAllowlist is approved knowing it is not on the list, but it must still be only "not listed",
         // never something the tool refuses outright.
         var guard = sources.Find(job.Tool)?.Check(job.Request);
         if (guard is null || !(guard.Allowed || (job.OutsideAllowlist && guard.CanBeApproved)))
-            return new ApprovalResult(null, "The job's request is no longer allowed by the tool's allowed list.");
+            throw new ConflictException("The job's request is no longer allowed by the tool's allowed list.");
         job.OutsideAllowlist = !guard.Allowed; // the list may have been extended since: then it is simply allowed
         job.Status = JobStatus.Active;
-        await jobs.SaveAsync(job, ct);
-        return new ApprovalResult(job, null);
+        await SaveJobAsync(job, ct);
+        return ToDto(job);
     }
 
     /// <summary>Pauses an active job, or resumes a paused one. A job still waiting for approval can only be approved
     /// or deleted, so enabling can't bypass approval.</summary>
-    public async Task<CollectionJob?> SetEnabledAsync(Guid agentId, Guid jobId, bool enabled, CancellationToken ct)
+    public async Task<CollectionJobDto> SetEnabledAsync(Guid agentId, Guid jobId, bool enabled, CancellationToken ct)
     {
+        await EnsureDashboardAgent(agentId, ct);
         var job = await jobs.GetAsync(agentId, jobId, ct);
-        if (job is null || job.Status == JobStatus.PendingApproval) return null;
+        if (job is null || job.Status == JobStatus.PendingApproval)
+            throw new ConflictException("The job does not exist or is still waiting for approval (approve or delete it).");
 
         job.Status = enabled ? JobStatus.Active : JobStatus.Disabled;
-        await jobs.SaveAsync(job, ct);
-        return job;
+        await SaveJobAsync(job, ct);
+        return ToDto(job);
     }
 
-    public Task<bool> DeleteAsync(Guid agentId, Guid jobId, CancellationToken ct) => jobs.DeleteAsync(agentId, jobId, ct);
+    public async Task DeleteAsync(Guid agentId, Guid jobId, CancellationToken ct)
+    {
+        var job = await jobs.GetAsync(agentId, jobId, ct) ?? throw new NotFoundException($"Job {jobId} not found.");
+        db.CollectionJobs.Remove(job);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Runs every active job of the agent now, or only <paramref name="jobId"/>, on every connection it applies to.</summary>
+    public async Task<RunNowResultDto> RunNowAsync(Guid agentId, Guid? jobId, CancellationToken ct)
+    {
+        if (jobId is { } id)
+        {
+            await EnsureDashboardAgent(agentId, ct);
+            var job = await jobs.GetAsync(agentId, id, ct) ?? throw new NotFoundException($"Job {id} not found.");
+            if (job.Status != JobStatus.Active) throw new ConflictException("Only an active job can be run. Approve or enable it first.");
+        }
+
+        var result = await runner.RunAsync(agentId, JobSelection.All, jobId, ct)
+            ?? throw new InvalidRequestException("Agent not found or not a Dashboard & Alerts agent.");
+        if (result.Skipped) throw new ConflictException("A collection pass is already running for this agent.");
+        return new RunNowResultDto(result.JobsRun, result.Results.Select(r => new RunNowItemDto(r.Job, r.Target, r.Success, r.Rows, r.Error)).ToList());
+    }
 
     // ---- helpers -------------------------------------------------------------------
 
@@ -250,8 +289,10 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
 
     /// <summary>Names of datasets this agent's jobs write, whether or not they have run yet, so dashboards and
     /// alert rules can be built against a job that is still waiting for approval.</summary>
-    public async Task<IReadOnlySet<string>> DeclaredDatasetsAsync(Guid agentId, CancellationToken ct) =>
-        DeclaredDatasets(await jobs.GetAllAsync(agentId, ct));
+    public async Task<IReadOnlySet<string>> DeclaredDatasetsAsync(Guid agentId, CancellationToken ct)
+    {
+        return DeclaredDatasets(await jobs.GetAllAsync(agentId, ct));
+    }
 
     public static IReadOnlySet<string> DeclaredDatasets(IEnumerable<CollectionJob> all)
     {
@@ -284,5 +325,28 @@ public sealed class CollectionJobService(ICollectionJobsRepository jobs, IAgents
         return windows;
     }
 
-    private static string? Clean(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    private static string? Clean(string? text)
+    {
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private async Task SaveJobAsync(CollectionJob job, CancellationToken ct)
+    {
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task EnsureDashboardAgent(Guid agentId, CancellationToken ct)
+    {
+        if (!await agents.IsDashboardAlertsAgentAsync(agentId, ct)) throw new NotFoundException($"Agent {agentId} not found.");
+    }
+
+    private static CollectionJobDto ToDto(CollectionJob j)
+    {
+        return new CollectionJobDto(
+            j.Id, j.Name, j.Description, j.Tool, j.Request, j.IntervalMinutes,
+            JsonSerializer.Deserialize<JsonElement>(j.ParserJson), JsonSerializer.Deserialize<JsonElement>(j.DatasetJson),
+            string.IsNullOrEmpty(j.TargetsJson) ? null : JsonSerializer.Deserialize<List<string>>(j.TargetsJson),
+            j.Status, j.Source, j.LastRunAt, j.LastError, j.LastRowCount, j.CreatedAt, j.UpdatedAt, ApprovalToken(j), j.OutsideAllowlist);
+    }
 }

@@ -15,9 +15,11 @@ public sealed class OpenAiProvider(HttpClient httpClient, AIProviderConfigCache 
 
     // Newer OpenAI models (gpt-5, o-series) reject the legacy max_tokens parameter. A custom BaseUrl
     // (LM Studio, vLLM, LiteLLM...) may only understand max_tokens, so only switch for real OpenAI.
-    protected override bool UseMaxCompletionTokens(string model) =>
-        GetConfigValue("BaseUrl") is not { Length: > 0 } url
+    protected override bool UseMaxCompletionTokens(string model)
+    {
+        return GetConfigValue("BaseUrl") is not { Length: > 0 } url
         || url.Contains("api.openai.com", StringComparison.OrdinalIgnoreCase);
+    }
 
     public override IReadOnlyList<ProviderConfigField> ConfigFields { get; } =
     [

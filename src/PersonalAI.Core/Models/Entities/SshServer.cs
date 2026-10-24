@@ -29,4 +29,21 @@ public class SshServer
     public string? LastError { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>Records a connection attempt: last seen or the error, and pins <paramref name="pinFingerprint"/> if no host
+    /// key is pinned yet. Callers pass a fingerprint only after connecting and authenticating, never from a failed attempt.</summary>
+    public void RecordConnection(bool success, string? error, string? pinFingerprint)
+    {
+        if (success)
+        {
+            LastSeenAt = DateTimeOffset.UtcNow;
+            LastError = null;
+        }
+        else
+        {
+            LastError = error;
+        }
+        if (pinFingerprint is not null && HostKeyFingerprint is null)
+            HostKeyFingerprint = pinFingerprint;
+    }
 }

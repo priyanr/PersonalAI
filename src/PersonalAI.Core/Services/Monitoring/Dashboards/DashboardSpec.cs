@@ -64,5 +64,8 @@ public static class DashboardSpecJson
         }
     }
 
-    public static string Serialize(DashboardSpec spec) => JsonSerializer.Serialize(spec, Options);
+    public static string Serialize(DashboardSpec spec)
+    {
+        return JsonSerializer.Serialize(spec, Options);
+    }
 }

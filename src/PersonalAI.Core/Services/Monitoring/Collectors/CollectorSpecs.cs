@@ -65,7 +65,10 @@ public static partial class CollectorSpecs
         }
     }
 
-    public static string Serialize<T>(T spec) => JsonSerializer.Serialize(spec, Json);
+    public static string Serialize<T>(T spec)
+    {
+        return JsonSerializer.Serialize(spec, Json);
+    }
 
     public static List<string> Validate(ParserSpec p)
     {
@@ -128,14 +131,17 @@ public static partial class CollectorSpecs
     }
 
     /// <summary>Field names a parser is known to produce, or null when they can't be known (kv without columns).</summary>
-    public static IReadOnlySet<string>? ProducedFields(ParserSpec p) => p.Type switch
+    public static IReadOnlySet<string>? ProducedFields(ParserSpec p)
     {
-        "table" => (p.Columns ?? []).Where(c => c.Name is not null).Select(c => c.Name!).ToHashSet(),
-        "json" when p.Fields is { Count: > 0 } => p.Fields.Keys.ToHashSet(),
-        "regex" when !string.IsNullOrWhiteSpace(p.Pattern) => new Regex(p.Pattern, RegexOptions.None, TimeSpan.FromMilliseconds(200))
-            .GetGroupNames().Where(g => !int.TryParse(g, out _)).ToHashSet(),
-        _ => null
-    };
+        return p.Type switch
+        {
+            "table" => (p.Columns ?? []).Where(c => c.Name is not null).Select(c => c.Name!).ToHashSet(),
+            "json" when p.Fields is { Count: > 0 } => p.Fields.Keys.ToHashSet(),
+            "regex" when !string.IsNullOrWhiteSpace(p.Pattern) => new Regex(p.Pattern, RegexOptions.None, TimeSpan.FromMilliseconds(200))
+                .GetGroupNames().Where(g => !int.TryParse(g, out _)).ToHashSet(),
+            _ => null
+        };
+    }
 
     public static List<string> Validate(DatasetSpec d)
     {

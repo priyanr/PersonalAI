@@ -4,7 +4,7 @@ using PersonalAI.Core.Models.DTOs;
 namespace PersonalAI.Core.Services.AI;
 
 /// <summary>In-memory mirror of AIProviderConfig (and the per-model ModelConfig settings), kept in sync with
-/// the DB by the startup load and by AIProvidersController / ModelsController after every update, so providers
+/// the DB by the startup load and by AIProviderConfigService after every update, so providers
 /// can read connection details and model capabilities synchronously on the hot path without a DB round-trip
 /// per chat call.</summary>
 public sealed class AIProviderConfigCache
@@ -18,22 +18,28 @@ public sealed class AIProviderConfigCache
 
     private static readonly IReadOnlyDictionary<string, string?> NoSettings = new Dictionary<string, string?>();
 
-    public string? GetValue(string providerKey, string fieldName) =>
-        _providers.TryGetValue(providerKey, out var fields) && fields.TryGetValue(fieldName, out var value)
+    public string? GetValue(string providerKey, string fieldName)
+    {
+        return _providers.TryGetValue(providerKey, out var fields) && fields.TryGetValue(fieldName, out var value)
             ? value
             : null;
+    }
 
     /// <summary>The provider's own "MaxOutputTokens" override when set to a positive integer, else
     /// <paramref name="fallback"/> (Agent:MaxOutputTokens). Lets a reasoning-heavy provider get a bigger
     /// per-call budget — its thinking counts against the same cap — without raising it for every provider.</summary>
-    public int ResolveMaxOutputTokens(string providerKey, int fallback) =>
-        int.TryParse(GetValue(providerKey, MaxOutputTokensField), out var value) && value > 0 ? value : fallback;
+    public int ResolveMaxOutputTokens(string providerKey, int fallback)
+    {
+        return int.TryParse(GetValue(providerKey, MaxOutputTokensField), out var value) && value > 0 ? value : fallback;
+    }
 
     /// <summary>The model's own MaxOutputTokens setting when set, else the provider-level resolution.</summary>
-    public int ResolveMaxOutputTokens(string providerKey, string model, int fallback) =>
-        int.TryParse(GetModelValue(providerKey, model, MaxOutputTokensField), out var value) && value > 0
+    public int ResolveMaxOutputTokens(string providerKey, string model, int fallback)
+    {
+        return int.TryParse(GetModelValue(providerKey, model, MaxOutputTokensField), out var value) && value > 0
             ? value
             : ResolveMaxOutputTokens(providerKey, fallback);
+    }
 
     public const string MaxOutputTokensField = "MaxOutputTokens";
 
@@ -51,19 +57,26 @@ public sealed class AIProviderConfigCache
         _providers[providerKey] = fields;
     }
 
-    private static string ModelKey(string providerKey, string model) => $"{providerKey}\n{model}";
+    private static string ModelKey(string providerKey, string model)
+    {
+        return $"{providerKey}\n{model}";
+    }
 
     /// <summary>All of a model's saved settings (empty when none).</summary>
-    public IReadOnlyDictionary<string, string?> GetModelSettings(string providerKey, string model) =>
-        _models.TryGetValue(ModelKey(providerKey, model), out var settings) ? settings : NoSettings;
+    public IReadOnlyDictionary<string, string?> GetModelSettings(string providerKey, string model)
+    {
+        return _models.TryGetValue(ModelKey(providerKey, model), out var settings) ? settings : NoSettings;
+    }
 
     /// <summary>One model setting, or null when unset, blank or "auto".</summary>
-    public string? GetModelValue(string providerKey, string model, string fieldName) =>
-        GetModelSettings(providerKey, model).TryGetValue(fieldName, out var value)
+    public string? GetModelValue(string providerKey, string model, string fieldName)
+    {
+        return GetModelSettings(providerKey, model).TryGetValue(fieldName, out var value)
         && !string.IsNullOrWhiteSpace(value)
         && !string.Equals(value, ModelSettings.Auto, StringComparison.OrdinalIgnoreCase)
             ? value
             : null;
+    }
 
     /// <summary>Replaces a model's settings; an empty set removes it.</summary>
     public void SetModel(string providerKey, string model, IReadOnlyDictionary<string, string?> values)
@@ -78,15 +91,19 @@ public sealed class AIProviderConfigCache
     }
 
     /// <summary>True when the user switched tool calling off for this model.</summary>
-    public bool ToolsDisabled(string providerKey, string model) =>
-        string.Equals(GetModelValue(providerKey, model, ModelSettings.ToolCallingField), ModelSettings.Disabled, StringComparison.OrdinalIgnoreCase);
+    public bool ToolsDisabled(string providerKey, string model)
+    {
+        return string.Equals(GetModelValue(providerKey, model, ModelSettings.ToolCallingField), ModelSettings.Disabled, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>The model's Thinking override when pinned on/off, else the caller's <paramref name="think"/>.</summary>
-    public bool? ResolveThink(string providerKey, string model, bool? think) =>
-        GetModelValue(providerKey, model, ModelSettings.ThinkingField)?.ToLowerInvariant() switch
+    public bool? ResolveThink(string providerKey, string model, bool? think)
+    {
+        return GetModelValue(providerKey, model, ModelSettings.ThinkingField)?.ToLowerInvariant() switch
         {
             ModelSettings.AlwaysOn => true,
             ModelSettings.AlwaysOff => false,
             _ => think
         };
+    }
 }

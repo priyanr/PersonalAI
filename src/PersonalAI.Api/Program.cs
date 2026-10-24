@@ -1,3 +1,4 @@
+using PersonalAI.Api;
 using PersonalAI.Api.Auth;
 using PersonalAI.Api.BackgroundServices;
 using PersonalAI.Core.Infrastructure;
@@ -46,6 +47,8 @@ builder.Services.AddControllers(options =>
         options.Filters.Add(new AuthorizeFilter());
 });
 builder.Services.AddOpenApi();
+builder.Services.AddExceptionHandler<ApiExceptionHandler>();
+builder.Services.AddProblemDetails();
 
 builder.Services.Configure<OllamaSettings>(builder.Configuration.GetSection(OllamaSettings.SectionName));
 builder.Services.Configure<SearchSettings>(builder.Configuration.GetSection(SearchSettings.SectionName));
@@ -98,6 +101,7 @@ builder.Services.AddScoped<AIProviderRegistry>();
 builder.Services.AddSingleton<AIProviderConfigCache>();
 builder.Services.AddScoped<IAIProviderConfigRepository, AIProviderConfigRepository>();
 builder.Services.AddScoped<IModelConfigRepository, ModelConfigRepository>();
+builder.Services.AddScoped<AIProviderConfigService>();
 
 builder.Services.AddHttpClient<ISearchProvider, SearXngSearchProvider>();
 builder.Services.AddHttpClient(HttpTool.HttpClientName);
@@ -107,6 +111,7 @@ builder.Services.AddHttpClient<GmailOAuthClient>();
 builder.Services.AddSingleton<GmailOAuthStateStore>();
 builder.Services.AddSingleton<ToolConfigCache>();
 builder.Services.AddScoped<IToolConfigRepository, ToolConfigRepository>();
+builder.Services.AddScoped<ToolConfigService>();
 
 builder.Services.AddSingleton<Workspace>();
 builder.Services.AddSingleton<AppSettingsCache>();
@@ -152,20 +157,25 @@ builder.Services.AddSingleton(sp => ToolRegistry.CreateDefault(
     ]));
 
 builder.Services.AddScoped<IChatSessionRepository, ChatSessionRepository>();
-builder.Services.AddScoped<IChatAgentService, ChatAgentService>();
+builder.Services.AddScoped<ChatSessionsService>();
+builder.Services.AddScoped<ChatHistoryCompaction>();
+builder.Services.AddScoped<ChatAgentService>();
 // Singleton: owns every running chat turn, independent of the request that started it.
-builder.Services.AddSingleton<IChatTurnRunner, ChatTurnRunner>();
+builder.Services.AddSingleton<ChatTurnRunner>();
 builder.Services.AddHostedService<ChatTurnShutdownService>();
 builder.Services.AddScoped<IAppSettingsRepository, AppSettingsRepository>();
-builder.Services.AddSingleton<SecretsCache>();
+builder.Services.AddScoped<AppSettingsService>();
+builder.Services.AddScoped<SecretsService>();
 builder.Services.AddScoped<ISecretsRepository, SecretsRepository>();
 builder.Services.AddScoped<ISkillsRepository, SkillsRepository>();
-builder.Services.AddScoped<ISkillExecutionService, SkillExecutionService>();
+builder.Services.AddScoped<SkillsService>();
+builder.Services.AddScoped<SkillExecutionService>();
 builder.Services.AddSingleton<IAgentTypeDescriptor, GeneralAgentTypeDescriptor>();
 builder.Services.AddSingleton<IAgentTypeDescriptor, DashboardAlertsAgentTypeDescriptor>();
 builder.Services.AddSingleton<AgentTypeRegistry>();
 builder.Services.AddScoped<ISshServersRepository, SshServersRepository>();
 builder.Services.AddScoped<IDatasetRepository, DatasetRepository>();
+builder.Services.AddScoped<DatasetService>();
 builder.Services.AddSingleton<SshGuardProvider>();
 // Data sources: tools that read data from connections they own. Add one here (and its tool) to make a new kind of
 // connection available to Dashboard & Alerts agents; the runner and collector tools need no change.
@@ -177,13 +187,15 @@ builder.Services.AddScoped<CollectionJobService>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
 builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<IAlertsRepository, AlertsRepository>();
+builder.Services.AddScoped<AlertsService>();
 builder.Services.AddScoped<AlertRuleService>();
 builder.Services.AddScoped<AlertEvaluator>();
 builder.Services.AddScoped<ISshRunner, SshNetRunner>();
-builder.Services.AddScoped<SshConnectionService>();
+builder.Services.AddScoped<SshServersService>();
 builder.Services.AddScoped<IAgentsRepository, AgentsRepository>();
 builder.Services.AddScoped<IAgentRunsRepository, AgentRunsRepository>();
-builder.Services.AddScoped<IAgentExecutionService, AgentExecutionService>();
+builder.Services.AddScoped<AgentsService>();
+builder.Services.AddScoped<AgentExecutionService>();
 builder.Services.AddHostedService<AgentSchedulerHostedService>();
 builder.Services.AddHostedService<CollectionHostedService>();
 builder.Services.AddHostedService<SandboxReaperHostedService>();
@@ -218,6 +230,8 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+app.UseExceptionHandler();
 
 app.UseSerilogRequestLogging();
 
@@ -261,10 +275,6 @@ using (var scope = app.Services.CreateScope())
     var toolConfigCache = scope.ServiceProvider.GetRequiredService<ToolConfigCache>();
     foreach (var (toolName, values) in toolConfigRepo.GetAllAsync(CancellationToken.None).GetAwaiter().GetResult())
         toolConfigCache.SetTool(toolName, values);
-
-    var secretsRepo = scope.ServiceProvider.GetRequiredService<ISecretsRepository>();
-    var secretsCache = scope.ServiceProvider.GetRequiredService<SecretsCache>();
-    secretsCache.LoadAll(secretsRepo.GetAllAsync(CancellationToken.None).GetAwaiter().GetResult());
 }
 
 // Configure the HTTP request pipeline.

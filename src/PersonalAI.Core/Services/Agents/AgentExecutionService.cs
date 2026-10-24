@@ -2,8 +2,10 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.DTOs;
+using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Models.Settings;
@@ -16,26 +18,22 @@ using Microsoft.Extensions.Options;
 
 namespace PersonalAI.Core.Services.Agents;
 
-/// <summary>Executes an Agent's prompt through its own short agentic loop, same shape as
-/// SkillExecutionService's, except the "tools" it exposes to the model are the agent's allowed Skills —
-/// each invoked via ISkillExecutionService and folded back in as a single tool result — plus any Tools
-/// the agent is allowed to call directly, executed the same restricted way SkillExecutionService runs a
-/// tool: no user is present to approve a workspace-escape, so ToolApprovalRequired is rejected instead of
-/// pausing. Every run is recorded as an AgentRun (created Running before the first provider call,
-/// finalized when the loop ends or fails) regardless of whether the caller — the SSE controller for a
-/// manual run, or the scheduler for an unattended one — consumes the whole stream.</summary>
+/// <summary>Runs an Agent: a short, unattended agent loop whose tools are the agent's skills (each folded into one tool
+/// result) and the tools it may call directly. No user is there to approve anything, so a call that needs approval is
+/// refused. Every run is recorded as an AgentRun, whether or not the caller reads the whole stream.</summary>
 public sealed class AgentExecutionService(
+    AppDbContext db,
     IAgentsRepository agentsRepo,
     IAgentRunsRepository runsRepo,
     ISkillsRepository skillsRepo,
-    ISkillExecutionService skillExecution,
+    SkillExecutionService skillExecution,
     AIProviderRegistry providers,
     ToolRegistry tools,
     IOptions<AgentSettings> agentSettings,
     ISandboxHostClient sandboxHostClient,
     AgentTypeRegistry agentTypes,
     ILogger<AgentExecutionService> logger,
-    Monitoring.Collectors.DataSourceRegistry? dataSources = null) : IAgentExecutionService
+    Monitoring.Collectors.DataSourceRegistry dataSources)
 {
     /// <summary>What a run (or a follow-up on a finished run) needs that does not depend on the run itself.</summary>
     private sealed record RunContext(
@@ -61,13 +59,16 @@ public sealed class AgentExecutionService(
         "Do what they ask, using your tools when it needs them (for example to add something the dashboard is missing, " +
         "or a collection job); otherwise just answer. Reply with plain text when done.";
 
+    /// <summary>Runs the agent once and records the run; the agent's LastRunAt and NextRunAt move on when it ends.</summary>
     public async IAsyncEnumerable<AgentStreamEvent> RunAsync(Guid agentId, AgentRunTrigger trigger, [EnumeratorCancellation] CancellationToken ct)
     {
         var context = await PrepareAsync(agentId, ct);
-        var run = await runsRepo.CreateAsync(agentId, trigger, ct);
+        var run = new AgentRun { AgentId = agentId, Trigger = trigger };
+        db.AgentRuns.Add(run);
+        await db.SaveChangesAsync(ct);
         var messages = new List<AiChatMessage> { new("system", ""), new("user", "Run this agent.") };
 
-        await foreach (var evt in LoopAsync(context, run.Id, messages, [], followUp: null, ct))
+        await foreach (var evt in LoopAsync(context, run, messages, [], followUp: null, ct))
             yield return evt;
     }
 
@@ -88,13 +89,16 @@ public sealed class AgentExecutionService(
             transcript.Add(new AgentRunTranscriptEntry("user", null, message.Trim(), false));
 
             var origin = new FollowUpOrigin(run.Status, run.Summary, run.CompletedAt);
-            if (!await runsRepo.ReopenAsync(runId, JsonSerializer.Serialize(transcript), ct))
-                throw new InvalidOperationException("This run is still in progress.");
+            if (run.Status == AgentRunStatus.Running) throw new InvalidOperationException("This run is still in progress.");
+            run.Status = AgentRunStatus.Running;
+            run.CompletedAt = null;
+            run.TranscriptJson = JsonSerializer.Serialize(transcript);
+            await db.SaveChangesAsync(ct);
 
             var messages = new List<AiChatMessage> { new("system", ""), new("user", "Run this agent.") };
             messages.AddRange(RebuildHistory(transcript));
 
-            await foreach (var evt in LoopAsync(context, runId, messages, transcript, origin, ct))
+            await foreach (var evt in LoopAsync(context, run, messages, transcript, origin, ct))
                 yield return evt;
         }
         finally
@@ -173,7 +177,7 @@ public sealed class AgentExecutionService(
         var descriptor = agentTypes.Get(agent.Type);
         var required = descriptor.RequiredTools.ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var name in descriptor.ToolsFor(agent.TypeConfigJson))
-            if (required.Contains(name) || dataSources?.Find(name) is not null) enabledDirectTools.Add(name);
+            if (required.Contains(name) || dataSources.Find(name) is not null) enabledDirectTools.Add(name);
         toolDefinitions.AddRange(tools.Definitions.Where(d => enabledDirectTools.Contains(d.Name)));
 
         return new RunContext(agent, toolNameToSkillId, toolDefinitions, enabledDirectTools,
@@ -181,15 +185,14 @@ public sealed class AgentExecutionService(
     }
 
     private async IAsyncEnumerable<AgentStreamEvent> LoopAsync(
-        RunContext context, Guid runId, List<AiChatMessage> messages, List<AgentRunTranscriptEntry> transcript, FollowUpOrigin? followUp,
+        RunContext context, AgentRun run, List<AiChatMessage> messages, List<AgentRunTranscriptEntry> transcript, FollowUpOrigin? followUp,
         [EnumeratorCancellation] CancellationToken ct)
     {
         var (agent, toolNameToSkillId, toolDefinitions, enabledDirectTools, skillAndToolCount, provider) = context;
         var agentId = agent.Id;
+        var runId = run.Id;
 
-        // Everything from here on runs against this run's own ephemeral sandbox (SandboxOwnerKind.AgentRun,
-        // runId) — torn down in the finally below regardless of how the run ends (success, failure,
-        // cancellation). Nothing before this point could have created a sandbox, since runId didn't exist yet.
+        // Tools run in this run's own sandbox, which the finally below removes however the run ends.
         try
         {
             yield return new AgentRunStartedEvent(runId);
@@ -202,111 +205,65 @@ public sealed class AgentExecutionService(
             {
                 ct.ThrowIfCancellationRequested();
 
-                // Relayed fresh each call (the system message is resent with the full history every
-                // iteration) so the model can see its own budget and pace itself instead of being cut off
-                // mid-task when the cap is hit.
+                // The budget is restated on every call so the model can pace itself instead of being cut off mid-task.
                 messages[0] = messages[0] with
                 {
                     Content = basePrompt + $"\n\n[Call budget] This is LLM call {iteration + 1} of {maxIterations} for this run. " +
                         "Finish and respond with plain text (no further tool calls) before you exceed this budget."
                 };
 
-                var contentBuilder = new StringBuilder();
-                var reasoningBuilder = new StringBuilder();
-                IReadOnlyList<AiToolCall>? toolCalls = null;
-                AiTokenUsage? usage = null;
-                var hitOutputLimit = false;
-                string? providerError = null;
+                run.LlmCallCount++;
+                await db.SaveChangesAsync(ct);
+                yield return new LlmCallEvent(run.LlmCallCount);
 
-                // Retry a transient network failure, only if nothing from the failed attempt was consumed
-                // yet (otherwise a retry would duplicate streamed text or tool calls).
-                yield return new LlmCallEvent(await runsRepo.IncrementLlmCallsAsync(runId, ct));
-                var maxRetries = agentSettings.Value.ProviderRetryCount;
-                for (var attempt = 0; attempt <= maxRetries; attempt++)
+                // The reply's text streams to the caller as it arrives; the rest is known once the call is done.
+                var (textEvents, replyTask) = ProgressStream.Run(
+                    onText => CallModelAsync(provider, agent, messages, toolDefinitions, onText, ct),
+                    text => new TextDeltaEvent(text), CancellationToken.None);
+                await foreach (var evt in textEvents) yield return evt;
+                ModelReply reply;
+                try
                 {
-                    providerError = null;
-                    reasoningBuilder.Clear(); // a retried attempt starts its thinking over
-                    Exception? transientError = null;
-                    var enumerator = provider.ChatStreamAsync(agent.ModelName, messages, toolDefinitions, agent.NumCtx, think: null, agent.ReasoningEffort, ct)
-                        .GetAsyncEnumerator(ct);
-                    try
-                    {
-                        while (true)
-                        {
-                            bool moved;
-                            try
-                            {
-                                moved = await enumerator.MoveNextAsync();
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, "Run was cancelled.", transcript, CancellationToken.None);
-                                throw;
-                            }
-                            catch (Exception ex)
-                            {
-                                providerError = ProviderErrors.Describe(ex);
-                                if (attempt < maxRetries && contentBuilder.Length == 0 && toolCalls is null && ProviderErrors.IsTransient(ex))
-                                    transientError = ex;
-                                break;
-                            }
-                            if (!moved) break;
-
-                            var chunk = enumerator.Current;
-                            if (!string.IsNullOrEmpty(chunk.ReasoningDelta))
-                                reasoningBuilder.Append(chunk.ReasoningDelta);
-                            if (!string.IsNullOrEmpty(chunk.ContentDelta))
-                            {
-                                contentBuilder.Append(chunk.ContentDelta);
-                                yield return new TextDeltaEvent(chunk.ContentDelta);
-                            }
-                            if (chunk.ToolCalls is { Count: > 0 })
-                                toolCalls = chunk.ToolCalls;
-                            if (chunk.Usage is not null)
-                                usage = chunk.Usage;
-                            if (chunk.HitOutputLimit)
-                                hitOutputLimit = true;
-                        }
-                    }
-                    finally
-                    {
-                        await enumerator.DisposeAsync();
-                    }
-
-                    if (transientError is null) break;
-                    await Task.Delay(TimeSpan.FromSeconds(agentSettings.Value.ProviderRetryDelaySeconds), ct);
+                    reply = await replyTask;
                 }
+                catch (OperationCanceledException)
+                {
+                    await FinalizeAsync(run, agent, followUp, AgentRunStatus.Failed, "Run was cancelled.", transcript, CancellationToken.None);
+                    throw;
+                }
+                var (assistantContent, reasoning, toolCalls, usage, hitOutputLimit, providerError) = reply;
 
                 if (usage is not null)
                 {
-                    var (inputTokens, outputTokens) = await runsRepo.AddTokenUsageAsync(runId, usage, ct);
-                    yield return new TokenUsageEvent(inputTokens, outputTokens);
+                    run.TotalInputTokens += usage.InputTokens;
+                    run.TotalOutputTokens += usage.OutputTokens;
+                    await db.SaveChangesAsync(ct);
+                    yield return new TokenUsageEvent(run.TotalInputTokens, run.TotalOutputTokens);
                 }
 
                 if (providerError is not null)
                 {
-                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, providerError, transcript, CancellationToken.None);
+                    await FinalizeAsync(run, agent, followUp, AgentRunStatus.Failed, providerError, transcript, CancellationToken.None);
                     yield return new ErrorEvent(providerError);
                     yield break;
                 }
 
-                var assistantContent = contentBuilder.ToString();
                 if (string.IsNullOrWhiteSpace(assistantContent) && toolCalls is not { Count: > 0 })
                 {
                     // Not a successful run with a blank summary — see ModelReplyDiagnostics.
                     var emptyNotice = ModelReplyDiagnostics.EmptyReplyNotice(
-                        agent.ProviderKey, hitOutputLimit, reasoningBuilder.Length > 0, usage, canDisableThinking: false);
-                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, emptyNotice, transcript, CancellationToken.None);
+                        agent.ProviderKey, hitOutputLimit, reasoning.Length > 0, usage, canDisableThinking: false);
+                    await FinalizeAsync(run, agent, followUp, AgentRunStatus.Failed, emptyNotice, transcript, CancellationToken.None);
                     yield return new ErrorEvent(emptyNotice);
                     yield break;
                 }
 
                 messages.Add(new AiChatMessage("assistant", assistantContent, toolCalls,
-                    ReasoningContent: toolCalls is { Count: > 0 } && reasoningBuilder.Length > 0 ? reasoningBuilder.ToString() : null));
+                    ReasoningContent: toolCalls is { Count: > 0 } && reasoning.Length > 0 ? reasoning : null));
                 if (!string.IsNullOrWhiteSpace(assistantContent))
                 {
                     transcript.Add(new AgentRunTranscriptEntry("text", null, assistantContent, false));
-                    await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
+                    await SaveTranscriptAsync();
                 }
 
                 if (toolCalls is null || toolCalls.Count == 0)
@@ -315,12 +272,12 @@ public sealed class AgentExecutionService(
                     {
                         // The partial answer is already in the transcript; the run didn't finish it.
                         var cutOffNotice = ModelReplyDiagnostics.CutOffAnswerNotice(agent.ProviderKey, canDisableThinking: false);
-                        await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, cutOffNotice, transcript, CancellationToken.None);
+                        await FinalizeAsync(run, agent, followUp, AgentRunStatus.Failed, cutOffNotice, transcript, CancellationToken.None);
                         yield return new ErrorEvent(cutOffNotice);
                         yield break;
                     }
 
-                    await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Succeeded, assistantContent, transcript, ct);
+                    await FinalizeAsync(run, agent, followUp, AgentRunStatus.Succeeded, assistantContent, transcript, ct);
                     yield return new DoneEvent();
                     yield break;
                 }
@@ -328,112 +285,58 @@ public sealed class AgentExecutionService(
                 foreach (var call in toolCalls)
                 {
                     ct.ThrowIfCancellationRequested();
+                    var key = (call.Name, call.ArgumentsJson);
 
                     if (ModelReplyDiagnostics.TruncatedToolCallError(call, toolCalls, hitOutputLimit) is { } truncatedError)
                     {
-                        messages.Add(new AiChatMessage("tool", truncatedError, null, call.ToolCallId));
-                        transcript.Add(new AgentRunTranscriptEntry("tool", call.Name, truncatedError, true));
-                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
-                        yield return new ToolResultEvent(Guid.NewGuid(), call.Name, truncatedError, true);
+                        yield return await AnswerAsync(call, "tool", truncatedError, true);
                         continue;
                     }
-
-                    var key = (call.Name, call.ArgumentsJson);
                     if (failedCalls.TryGetValue(key, out var previousError))
                     {
-                        var msg = $"You already made this exact call and it failed with: {previousError} Do not repeat it.";
-                        messages.Add(new AiChatMessage("tool", msg, null, call.ToolCallId));
-                        transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, msg, true));
-                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
-                        yield return new ToolResultEvent(Guid.NewGuid(), call.Name, msg, true);
+                        yield return await AnswerAsync(call, "skill", $"You already made this exact call and it failed with: {previousError} Do not repeat it.", true);
                         continue;
                     }
 
-                    if (!toolNameToSkillId.TryGetValue(call.Name, out var skillId))
+                    string content;
+                    bool failed;
+                    string kind;
+                    if (toolNameToSkillId.TryGetValue(call.Name, out var skillId))
                     {
-                        if (enabledDirectTools.Contains(call.Name) && tools.TryGet(call.Name, out var directTool))
-                        {
-                            var channel = System.Threading.Channels.Channel.CreateUnbounded<AgentStreamEvent>();
-                            var executionTask = ExecuteDirectToolAsync(directTool, call.ArgumentsJson, runId, agentId, msg => channel.Writer.TryWrite(new ToolProgressEvent(Guid.Empty, call.Name, msg)), ct);
-                            while (true)
-                            {
-                                var finished = await Task.WhenAny(executionTask, channel.Reader.WaitToReadAsync(ct).AsTask());
-                                if (finished == executionTask) break;
-                                while (channel.Reader.TryRead(out var evt)) yield return evt;
-                            }
-                            channel.Writer.Complete();
-                            while (channel.Reader.TryRead(out var evt)) yield return evt;
-
-                            var (directResult, directFailed) = await executionTask;
-                            messages.Add(new AiChatMessage("tool", directResult, null, call.ToolCallId));
-                            transcript.Add(new AgentRunTranscriptEntry("tool", call.Name, directResult, directFailed));
-                            await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
-                            if (directFailed) failedCalls[key] = FirstLine(directResult);
-                            else failedCalls.Clear(); // state changed — a previously failed call may now succeed
-                            yield return new ToolResultEvent(Guid.Empty, call.Name, directResult, directFailed);
-                            continue;
-                        }
-
-                        var errMsg = $"'{call.Name}' is not one of this agent's enabled skills or tools.";
-                        failedCalls[key] = errMsg;
-                        messages.Add(new AiChatMessage("tool", errMsg, null, call.ToolCallId));
-                        transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, errMsg, true));
-                        await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
-                        yield return new ToolResultEvent(Guid.NewGuid(), call.Name, errMsg, true);
+                        (content, failed) = await skillExecution.RunAsToolAsync(skillId, SkillToolCatalog.ExtractInputArg(call.ArgumentsJson), ct);
+                        kind = "skill";
+                    }
+                    else if (enabledDirectTools.Contains(call.Name) && tools.TryGet(call.Name, out var directTool))
+                    {
+                        var (progress, execution) = ProgressStream.Run(
+                            onProgress => ExecuteDirectToolAsync(directTool, call.ArgumentsJson, runId, agentId, onProgress, ct),
+                            msg => new ToolProgressEvent(Guid.Empty, call.Name, msg), ct);
+                        await foreach (var evt in progress) yield return evt;
+                        (content, failed) = await execution;
+                        kind = "tool";
+                    }
+                    else
+                    {
+                        var notEnabled = $"'{call.Name}' is not one of this agent's enabled skills or tools.";
+                        failedCalls[key] = notEnabled;
+                        yield return await AnswerAsync(call, "skill", notEnabled, true);
                         continue;
                     }
 
-                    var input = SkillToolCatalog.ExtractInputArg(call.ArgumentsJson);
-                    var skillOutput = new StringBuilder();
-                    var skillFailed = false;
-                    try
-                    {
-                        await foreach (var evt in skillExecution.RunAsync(skillId, input, ct))
-                        {
-                            switch (evt)
-                            {
-                                case TextDeltaEvent d:
-                                    skillOutput.Append(d.Text);
-                                    break;
-                                case ToolResultEvent t when t.IsError:
-                                    skillFailed = true;
-                                    break;
-                                case ErrorEvent e:
-                                    skillFailed = true;
-                                    if (skillOutput.Length > 0) skillOutput.Append('\n');
-                                    skillOutput.Append(e.Message);
-                                    break;
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
-                    {
-                        skillFailed = true;
-                        skillOutput.Append(ex.Message);
-                    }
-
-                    var resultContent = skillOutput.Length > 0
-                        ? skillOutput.ToString()
-                        : skillFailed ? "Skill run failed." : "Skill produced no output.";
-                    messages.Add(new AiChatMessage("tool", resultContent, null, call.ToolCallId));
-                    transcript.Add(new AgentRunTranscriptEntry("skill", call.Name, resultContent, skillFailed));
-                    await runsRepo.AppendTranscriptAsync(runId, JsonSerializer.Serialize(transcript), ct);
-                    if (skillFailed) failedCalls[key] = FirstLine(resultContent);
-                    else failedCalls.Clear(); // state changed — a previously failed call may now succeed
-                    yield return new ToolResultEvent(Guid.NewGuid(), call.Name, resultContent, skillFailed);
+                    // A failure is remembered so the model can't repeat it; a success may have changed what would fail.
+                    if (failed) failedCalls[key] = FirstLine(content);
+                    else failedCalls.Clear();
+                    yield return await AnswerAsync(call, kind, content, failed);
                 }
             }
 
             var capMessage = $"Stopped after {maxIterations} tool iterations without a final answer.";
-            await FinalizeAsync(runId, agentId, followUp, AgentRunStatus.Failed, capMessage, transcript, ct);
+            await FinalizeAsync(run, agent, followUp, AgentRunStatus.Failed, capMessage, transcript, ct);
             yield return new ErrorEvent(capMessage);
         }
         finally
         {
-            // Skipping entirely when no host is connected avoids exception noise on every run in
-            // deployments that never enable the sandbox feature — if it were never connected, no
-            // sandbox could have been created for this runId either.
+            // Without a connected host no sandbox can exist for this run, so there is nothing to remove.
             if (sandboxHostClient.IsConnected)
             {
                 try
@@ -442,16 +345,76 @@ public sealed class AgentExecutionService(
                 }
                 catch (Exception ex)
                 {
-                    // A failed teardown must never mask the run's real outcome — this is a best-effort
-                    // safety net; the reaper's EphemeralGraceMinutes sweep is the backstop if it fails.
+                    // Best effort: a failed teardown must not hide the run's outcome; the reaper removes it later.
                     logger.LogWarning(ex, "Failed to tear down ephemeral sandbox for agent run {RunId}.", runId);
                 }
             }
         }
+
+        // Saved after every step, so a viewer polling the run sees it stream in rather than only once it finishes.
+        async Task SaveTranscriptAsync()
+        {
+            run.TranscriptJson = JsonSerializer.Serialize(transcript);
+            await db.SaveChangesAsync(ct);
+        }
+
+        // Gives the model a tool call's result and records it in the run's transcript.
+        async Task<ToolResultEvent> AnswerAsync(AiToolCall call, string kind, string content, bool isError)
+        {
+            messages.Add(new AiChatMessage("tool", content, null, call.ToolCallId));
+            transcript.Add(new AgentRunTranscriptEntry(kind, call.Name, content, isError));
+            await SaveTranscriptAsync();
+            return new ToolResultEvent(Guid.NewGuid(), call.Name, content, isError);
+        }
     }
 
+    /// <summary>One model call. A transient network failure is retried, but only while nothing of the failed attempt has
+    /// been streamed yet (a retry would otherwise repeat text). Streamed text goes to <paramref name="onText"/>; a failure
+    /// that isn't retried is returned in Error.</summary>
+    private async Task<ModelReply> CallModelAsync(
+        IAIProvider provider, PersonalAI.Core.Models.Entities.Agent agent, List<AiChatMessage> messages, List<AiToolDefinition> toolDefinitions,
+        Action<string> onText, CancellationToken ct)
+    {
+        var content = new StringBuilder();
+        var reasoning = new StringBuilder();
+        IReadOnlyList<AiToolCall>? toolCalls = null;
+        AiTokenUsage? usage = null;
+        var hitOutputLimit = false;
+
+        for (var attempt = 0; ; attempt++)
+        {
+            reasoning.Clear(); // a retried attempt starts its thinking over
+            try
+            {
+                await foreach (var chunk in provider.ChatStreamAsync(agent.ModelName, messages, toolDefinitions, agent.NumCtx, think: null, agent.ReasoningEffort, ct))
+                {
+                    if (!string.IsNullOrEmpty(chunk.ReasoningDelta)) reasoning.Append(chunk.ReasoningDelta);
+                    if (!string.IsNullOrEmpty(chunk.ContentDelta))
+                    {
+                        content.Append(chunk.ContentDelta);
+                        onText(chunk.ContentDelta);
+                    }
+                    if (chunk.ToolCalls is { Count: > 0 }) toolCalls = chunk.ToolCalls;
+                    if (chunk.Usage is not null) usage = chunk.Usage;
+                    if (chunk.HitOutputLimit) hitOutputLimit = true;
+                }
+                return new ModelReply(content.ToString(), reasoning.ToString(), toolCalls, usage, hitOutputLimit, null);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                var retry = attempt < agentSettings.Value.ProviderRetryCount && content.Length == 0 && toolCalls is null && ProviderErrors.IsTransient(ex);
+                if (!retry) return new ModelReply(content.ToString(), reasoning.ToString(), toolCalls, usage, hitOutputLimit, ProviderErrors.Describe(ex));
+            }
+            await Task.Delay(TimeSpan.FromSeconds(agentSettings.Value.ProviderRetryDelaySeconds), ct);
+        }
+    }
+
+    private sealed record ModelReply(
+        string Content, string Reasoning, IReadOnlyList<AiToolCall>? ToolCalls, AiTokenUsage? Usage, bool HitOutputLimit, string? Error);
+
     private async Task FinalizeAsync(
-        Guid runId, Guid agentId, FollowUpOrigin? followUp, AgentRunStatus status, string? summary,
+        AgentRun run, PersonalAI.Core.Models.Entities.Agent agent, FollowUpOrigin? followUp, AgentRunStatus status, string? summary,
         List<AgentRunTranscriptEntry> transcript, CancellationToken ct)
     {
         if (followUp is not null)
@@ -460,16 +423,23 @@ public sealed class AgentExecutionService(
             // run that succeeded into a failed one. A failure is recorded in the transcript instead.
             if (status == AgentRunStatus.Failed)
                 transcript.Add(new AgentRunTranscriptEntry("text", null, summary, true));
-            await runsRepo.CompleteAsync(runId, followUp.Status, followUp.Summary, JsonSerializer.Serialize(transcript), ct, followUp.CompletedAt);
+            run.TranscriptJson = JsonSerializer.Serialize(transcript);
+            run.Status = followUp.Status;
+            run.Summary = followUp.Summary;
+            run.CompletedAt = followUp.CompletedAt;
+            await db.SaveChangesAsync(ct);
             return;
         }
 
-        await runsRepo.CompleteAsync(runId, status, summary, JsonSerializer.Serialize(transcript), ct);
-
+        // The run and the agent's schedule are saved together, so a finished run always moves the schedule on.
         var now = DateTimeOffset.UtcNow;
-        var agent = await agentsRepo.GetAsync(agentId, ct);
-        var nextRunAt = agent is null ? null : ScheduleCalculator.ComputeNextRunAt(agent, now);
-        await agentsRepo.SetRunOutcomeAsync(agentId, now, nextRunAt, ct);
+        run.TranscriptJson = JsonSerializer.Serialize(transcript);
+        run.Status = status;
+        run.Summary = summary;
+        run.CompletedAt = now;
+        agent.LastRunAt = now;
+        agent.NextRunAt = ScheduleCalculator.ComputeNextRunAt(agent, now);
+        await db.SaveChangesAsync(ct);
     }
 
     private string BuildSystemPrompt(PersonalAI.Core.Models.Entities.Agent agent, int enabledSkillAndToolCount)

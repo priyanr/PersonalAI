@@ -7,10 +7,16 @@ namespace PersonalAI.Core.Services.Ssh;
 public sealed record GuardResult(bool Allowed, string? Error, bool CanBeApproved = false)
 {
     public static readonly GuardResult Ok = new(true, null);
-    public static GuardResult Deny(string error) => new(false, error);
+    public static GuardResult Deny(string error)
+    {
+        return new(false, error);
+    }
 
     /// <summary>Refused because it is not on the allowed list; a person may still approve this exact request.</summary>
-    public static GuardResult NotListed(string error) => new(false, error, CanBeApproved: true);
+    public static GuardResult NotListed(string error)
+    {
+        return new(false, error, CanBeApproved: true);
+    }
 }
 
 /// <summary>Decides whether a command may be sent to a server over SSH. A model proposes the commands, so the
@@ -295,7 +301,10 @@ public sealed class SshCommandGuard(IReadOnlyList<string> allowlist)
     {
         var binary = tokens[0];
         var args = tokens.Skip(1).ToList();
-        string Not(string why) => $"'{string.Join(' ', tokens.Take(Math.Min(tokens.Count, 3)))}' is not on the allowed command list: {why}.";
+        string Not(string why)
+        {
+            return $"'{string.Join(' ', tokens.Take(Math.Min(tokens.Count, 3)))}' is not on the allowed command list: {why}.";
+        }
 
         switch (binary)
         {

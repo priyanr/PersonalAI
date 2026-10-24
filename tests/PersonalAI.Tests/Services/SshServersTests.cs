@@ -1,9 +1,8 @@
 using FluentAssertions;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using PersonalAI.Api.Controllers;
 using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Models;
 using PersonalAI.Core.Models.DTOs;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Services.Secrets;
@@ -22,76 +21,93 @@ public class SshServersTests
     private static AppDbContext NewDb() =>
         new(new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 
-    private static async Task<(SshServersRepository Repo, SshServer Server)> SeedServerAsync(AppDbContext db)
+    private static SshServersService NewService(AppDbContext db, SshCommandResult? probe = null) =>
+        new(db, new SshServersRepository(db), new SecretsRepository(db), new FakeSsh(probe ?? new(true, 0, "", "", null, null)));
+
+    private static async Task<SshServer> SeedServerAsync(AppDbContext db)
     {
-        var repo = new SshServersRepository(db);
-        var group = await repo.CreateGroupAsync("prod", null, CancellationToken.None);
-        var server = await repo.CreateServerAsync(group.Id, "web-1", "10.0.0.5", 22, "root", "web-key", true, CancellationToken.None);
-        return (repo, server!);
+        db.Secrets.Add(new Secret { Key = "SSH_WEB_KEY", Value = "pw" });
+        var group = await TestSeed.SshGroupAsync(db, "prod", null, CancellationToken.None);
+        return await TestSeed.SshServerAsync(db, group.Id, "web-1", "10.0.0.5", 22, "root", "SSH_WEB_KEY", true, CancellationToken.None);
+    }
+
+    private static SaveSshServerRequest Request(SshServer server, string name, string address) =>
+        new(server.GroupId, name, address, server.Port, server.Username, server.SecretRef);
+
+    [Fact]
+    public async Task CreateGroup_DuplicateName_Conflicts()
+    {
+        await using var db = NewDb();
+        var service = NewService(db);
+        await service.CreateGroup(new SaveSshServerGroupRequest("prod", null), CancellationToken.None);
+
+        var act = () => service.CreateGroup(new SaveSshServerGroupRequest(" prod ", null), CancellationToken.None);
+
+        await act.Should().ThrowAsync<ConflictException>();
     }
 
     [Fact]
-    public async Task CreateGroup_DuplicateName_Throws()
+    public async Task CreateServer_UnknownGroup_IsInvalid()
     {
         await using var db = NewDb();
-        var repo = new SshServersRepository(db);
-        await repo.CreateGroupAsync("prod", null, CancellationToken.None);
+        var server = await SeedServerAsync(db);
 
-        var act = () => repo.CreateGroupAsync("prod", null, CancellationToken.None);
+        var act = () => NewService(db).CreateServer(Request(server, "x", "h") with { GroupId = Guid.NewGuid() }, CancellationToken.None);
 
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        await act.Should().ThrowAsync<InvalidRequestException>().WithMessage("Group not found.");
     }
 
     [Fact]
-    public async Task CreateServer_UnknownGroup_ReturnsNull()
+    public async Task CreateServer_DuplicateNameInGroup_Conflicts()
     {
         await using var db = NewDb();
+        var server = await SeedServerAsync(db);
 
-        var server = await new SshServersRepository(db).CreateServerAsync(Guid.NewGuid(), "x", "h", 22, "u", "s", true, CancellationToken.None);
+        var act = () => NewService(db).CreateServer(Request(server, "web-1", "10.0.0.9"), CancellationToken.None);
 
-        server.Should().BeNull();
+        await act.Should().ThrowAsync<ConflictException>();
     }
 
     [Fact]
     public async Task DeleteGroup_RemovesItsServers()
     {
         await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
+        var server = await SeedServerAsync(db);
 
-        await repo.DeleteGroupAsync(server.GroupId, CancellationToken.None);
+        await NewService(db).DeleteGroup(server.GroupId, CancellationToken.None);
 
-        (await repo.GetServersAsync(null, CancellationToken.None)).Should().BeEmpty();
+        (await new SshServersRepository(db).GetServersAsync(null, CancellationToken.None)).Should().BeEmpty();
     }
 
     [Fact]
-    public async Task TestAsync_FirstSuccess_PinsHostKey()
+    public async Task TestConnection_FirstSuccess_PinsHostKey()
     {
         await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
-        var service = new SshConnectionService(repo, new FakeSsh(new(true, 0, "Linux 6.1\n", "", null, "SHA256:abc")));
+        var server = await SeedServerAsync(db);
+        var service = NewService(db, new(true, 0, "Linux 6.1\n", "", null, "SHA256:abc"));
 
-        var result = await service.TestAsync(server.Id, CancellationToken.None);
+        var result = await service.TestConnection(server.Id, CancellationToken.None);
 
-        result!.Success.Should().BeTrue();
+        result.Success.Should().BeTrue();
         result.ServerInfo.Should().Be("Linux 6.1");
-        var saved = await repo.GetServerAsync(server.Id, CancellationToken.None);
-        saved!.HostKeyFingerprint.Should().Be("SHA256:abc");
+        var saved = await service.GetServer(server.Id, CancellationToken.None);
+        saved.HostKeyFingerprint.Should().Be("SHA256:abc");
         saved.LastSeenAt.Should().NotBeNull();
         saved.LastError.Should().BeNull();
     }
 
     [Fact]
-    public async Task TestAsync_Failure_DoesNotPinAndRecordsError()
+    public async Task TestConnection_Failure_DoesNotPinAndRecordsError()
     {
         await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
-        var service = new SshConnectionService(repo, new FakeSsh(new(false, -1, "", "", "Permission denied", "SHA256:abc")));
+        var server = await SeedServerAsync(db);
+        var service = NewService(db, new(false, -1, "", "", "Permission denied", "SHA256:abc"));
 
-        var result = await service.TestAsync(server.Id, CancellationToken.None);
+        var result = await service.TestConnection(server.Id, CancellationToken.None);
 
-        result!.Success.Should().BeFalse();
-        var saved = await repo.GetServerAsync(server.Id, CancellationToken.None);
-        saved!.HostKeyFingerprint.Should().BeNull();
+        result.Success.Should().BeFalse();
+        var saved = await service.GetServer(server.Id, CancellationToken.None);
+        saved.HostKeyFingerprint.Should().BeNull();
         saved.LastError.Should().Be("Permission denied");
     }
 
@@ -99,49 +115,57 @@ public class SshServersTests
     public async Task UpdateServer_ChangedAddress_ClearsPinnedHostKey()
     {
         await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
-        await repo.RecordConnectionAsync(server.Id, true, null, "SHA256:abc", CancellationToken.None);
+        var server = await SeedServerAsync(db);
+        server.RecordConnection(true, null, "SHA256:abc");
+        await db.SaveChangesAsync();
 
-        var updated = await repo.UpdateServerAsync(server.Id, server.GroupId, "web-1", "10.0.0.6", 22, "root", "web-key", true, CancellationToken.None);
+        var updated = await NewService(db).UpdateServer(server.Id, Request(server, "web-1", "10.0.0.6"), CancellationToken.None);
 
-        updated!.HostKeyFingerprint.Should().BeNull();
+        updated.HostKeyFingerprint.Should().BeNull();
     }
 
     [Fact]
     public async Task UpdateServer_OnlyRenamed_KeepsPinnedHostKey()
     {
         await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
-        await repo.RecordConnectionAsync(server.Id, true, null, "SHA256:abc", CancellationToken.None);
+        var server = await SeedServerAsync(db);
+        server.RecordConnection(true, null, "SHA256:abc");
+        await db.SaveChangesAsync();
 
-        var updated = await repo.UpdateServerAsync(server.Id, server.GroupId, "web-one", "10.0.0.5", 22, "root", "web-key", true, CancellationToken.None);
+        var updated = await NewService(db).UpdateServer(server.Id, Request(server, "web-one", "10.0.0.5"), CancellationToken.None);
 
-        updated!.HostKeyFingerprint.Should().Be("SHA256:abc");
+        updated.HostKeyFingerprint.Should().Be("SHA256:abc");
     }
 
     [Fact]
-    public async Task Controller_CreateServer_MissingSecret_ReturnsBadRequest()
+    public void RecordConnection_NeverReplacesAPinnedHostKey()
     {
-        await using var db = NewDb();
-        var (repo, server) = await SeedServerAsync(db);
-        var controller = new SshServersController(repo, new SecretsRepository(db), new SshConnectionService(repo, new FakeSsh(new(true, 0, "", "", null, null))));
+        var server = new SshServer { Name = "s", Address = "a", Username = "u", SecretRef = "SSH_K", HostKeyFingerprint = "SHA256:old" };
 
-        var response = await controller.CreateServer(new SaveSshServerRequest(server.GroupId, "db-1", "10.0.0.9", null, "root", "nope"), CancellationToken.None);
+        server.RecordConnection(true, null, "SHA256:new");
 
-        response.Result.Should().BeOfType<BadRequestObjectResult>();
+        server.HostKeyFingerprint.Should().Be("SHA256:old");
     }
 
     [Fact]
-    public async Task Controller_CreateServer_Valid_DefaultsPortTo22()
+    public async Task CreateServer_MissingSecret_IsInvalid()
     {
         await using var db = NewDb();
-        var (repo, seeded) = await SeedServerAsync(db);
-        await new SecretsRepository(db).CreateAsync("SSH_DB_KEY", "pw", CancellationToken.None);
-        var controller = new SshServersController(repo, new SecretsRepository(db), new SshConnectionService(repo, new FakeSsh(new(true, 0, "", "", null, null))));
+        var server = await SeedServerAsync(db);
 
-        var response = await controller.CreateServer(new SaveSshServerRequest(seeded.GroupId, "db-1", "10.0.0.9", null, "root", "SSH_DB_KEY"), CancellationToken.None);
+        var act = () => NewService(db).CreateServer(Request(server, "db-1", "10.0.0.9") with { SecretRef = "SSH_NOPE" }, CancellationToken.None);
 
-        var dto = (response.Result as OkObjectResult)!.Value as SshServerDto;
-        dto!.Port.Should().Be(22);
+        await act.Should().ThrowAsync<InvalidRequestException>().WithMessage("No secret named 'SSH_NOPE'*");
+    }
+
+    [Fact]
+    public async Task CreateServer_Valid_DefaultsPortTo22()
+    {
+        await using var db = NewDb();
+        var server = await SeedServerAsync(db);
+
+        var dto = await NewService(db).CreateServer(Request(server, "db-1", "10.0.0.9") with { Port = null }, CancellationToken.None);
+
+        dto.Port.Should().Be(22);
     }
 }

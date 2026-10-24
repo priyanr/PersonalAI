@@ -154,12 +154,15 @@ public static class CollectorParser
         return current;
     }
 
-    private static string TopKeys(JsonNode root) => root switch
+    private static string TopKeys(JsonNode root)
     {
-        JsonObject o => string.Join(", ", o.Select(p => p.Key).Take(12)),
-        JsonArray => "(an array: use an empty path, or a numeric index)",
-        _ => "(a scalar)"
-    };
+        return root switch
+        {
+            JsonObject o => string.Join(", ", o.Select(p => p.Key).Take(12)),
+            JsonArray => "(an array: use an empty path, or a numeric index)",
+            _ => "(a scalar)"
+        };
+    }
 
     // ---- values -------------------------------------------------------------------
 
@@ -203,8 +206,10 @@ public static class CollectorParser
         }
     }
 
-    private static IEnumerable<string> Lines(string text) =>
-        text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => !string.IsNullOrWhiteSpace(l));
+    private static IEnumerable<string> Lines(string text)
+    {
+        return text.Split('\n').Select(l => l.TrimEnd('\r')).Where(l => !string.IsNullOrWhiteSpace(l));
+    }
 
     private static string Preview(string text)
     {

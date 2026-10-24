@@ -405,14 +405,17 @@ public sealed class NetworkScanTool : ITool
         return sb.ToString();
     }
 
-    private static string? TcpRiskFlag(int port) => port switch
+    private static string? TcpRiskFlag(int port)
     {
-        23 => "telnet exposed — unencrypted remote access",
-        21 => "FTP exposed — often unencrypted credentials",
-        139 or 445 => "SMB exposed — verify SMBv1 is disabled",
-        3389 => "RDP exposed — restrict to trusted hosts/VPN",
-        _ => null
-    };
+        return port switch
+        {
+            23 => "telnet exposed — unencrypted remote access",
+            21 => "FTP exposed — often unencrypted credentials",
+            139 or 445 => "SMB exposed — verify SMBv1 is disabled",
+            3389 => "RDP exposed — restrict to trusted hosts/VPN",
+            _ => null
+        };
+    }
 
     private static IEnumerable<string> HttpsRiskFlags(HttpsResult h)
     {
@@ -449,14 +452,22 @@ public sealed class NetworkScanTool : ITool
     {
         public ulong HostCount => PrefixLength == 0 ? 1UL << 32 : 1UL << (32 - PrefixLength);
 
-        public bool Contains(uint addressUint) => (addressUint & Mask(PrefixLength)) == BaseUint;
+        public bool Contains(uint addressUint)
+        {
+            return (addressUint & Mask(PrefixLength)) == BaseUint;
+        }
 
         /// <summary>True when this range is fully contained within <paramref name="outer"/> — this
         /// range's prefix is at least as specific, and its base address falls inside the outer range.</summary>
-        public bool IsContainedIn(CidrRange outer) => PrefixLength >= outer.PrefixLength && outer.Contains(BaseUint);
+        public bool IsContainedIn(CidrRange outer)
+        {
+            return PrefixLength >= outer.PrefixLength && outer.Contains(BaseUint);
+        }
 
-        public static CidrRange Parse(string cidr) =>
-            TryParse(cidr, out var range) ? range : throw new FormatException($"'{cidr}' is not a valid IPv4 CIDR range.");
+        public static CidrRange Parse(string cidr)
+        {
+            return TryParse(cidr, out var range) ? range : throw new FormatException($"'{cidr}' is not a valid IPv4 CIDR range.");
+        }
 
         public static bool TryParse(string text, out CidrRange range)
         {
@@ -494,11 +505,19 @@ public sealed class NetworkScanTool : ITool
             return (uint)((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]);
         }
 
-        public static IPAddress UIntToIp(uint value) =>
-            new([(byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value]);
+        public static IPAddress UIntToIp(uint value)
+        {
+            return new([(byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)value]);
+        }
 
-        private static uint Mask(int prefixLength) => prefixLength == 0 ? 0u : unchecked(uint.MaxValue << (32 - prefixLength));
+        private static uint Mask(int prefixLength)
+        {
+            return prefixLength == 0 ? 0u : unchecked(uint.MaxValue << (32 - prefixLength));
+        }
 
-        public override string ToString() => $"{UIntToIp(BaseUint)}/{PrefixLength}";
+        public override string ToString()
+        {
+            return $"{UIntToIp(BaseUint)}/{PrefixLength}";
+        }
     }
 }

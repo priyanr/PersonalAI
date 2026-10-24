@@ -1,7 +1,7 @@
-using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Services.Monitoring.Collectors;
+using PersonalAI.Core.Services.Agents;
 
 namespace PersonalAI.Api.BackgroundServices;
 

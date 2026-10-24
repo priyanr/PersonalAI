@@ -1,6 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Models;
+using PersonalAI.Core.Models.DTOs;
+using PersonalAI.Core.Services.Agents;
+using Microsoft.EntityFrameworkCore;
 using PersonalAI.Core.Services.Monitoring.Collectors;
 using PersonalAI.Core.Models.Entities;
 
@@ -18,13 +23,45 @@ public record AlertRuleSaveResult(AlertRule? Rule, bool Created, IReadOnlyList<s
 /// <summary>Creates, updates and deletes alert rules for both the UI (source "user") and the model (source "llm").
 /// Rules are validated against the data that has actually been collected, with the alternatives listed in the
 /// error, like dashboard specs. A model may only touch rules it authored.</summary>
-public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepository datasets, ICollectionJobsRepository? jobs = null)
+public sealed class AlertRuleService(
+    AppDbContext db, IAlertsRepository alerts, IDatasetRepository datasets, ICollectionJobsRepository jobs, IAgentsRepository agents)
 {
     public const int MaxRules = 50, MaxName = 100, MaxFilterKeys = 5, MaxForMinutes = 1440, SampleSize = 200;
 
+    // ---- the UI (/api/agents/{id}/alert-rules) ----
+
+    public async Task<List<AlertRuleDto>> GetRulesAsync(Guid agentId, CancellationToken ct)
+    {
+        await EnsureDashboardAgent(agentId, ct);
+        return (await alerts.GetRulesAsync(agentId, ct)).Select(ToDto).ToList();
+    }
+
+    public async Task<AlertRuleDto> CreateUserRuleAsync(Guid agentId, AlertRuleInput input, CancellationToken ct)
+    {
+        await EnsureDashboardAgent(agentId, ct);
+        return ToDtoOrThrow(await CreateAsync(agentId, input, AlertSources.User, ct));
+    }
+
+    public async Task<AlertRuleDto> UpdateRuleAsync(Guid agentId, Guid ruleId, AlertRuleInput input, CancellationToken ct)
+    {
+        await EnsureDashboardAgent(agentId, ct);
+        return ToDtoOrThrow(await UpdateAsync(agentId, ruleId, input, ct) ?? throw new NotFoundException($"Rule {ruleId} not found."));
+    }
+
+    /// <summary>Also deletes the rule's alerts.</summary>
+    public async Task DeleteRuleAsync(Guid agentId, Guid ruleId, CancellationToken ct)
+    {
+        var rule = await alerts.GetRuleAsync(agentId, ruleId, ct) ?? throw new NotFoundException($"Rule {ruleId} not found.");
+        await DeleteAsync(rule, ct);
+    }
+
+    // ---- shared by the UI and the model ----
+
     /// <summary>Creates a rule. Errors (including a duplicate name) leave nothing saved.</summary>
-    public Task<AlertRuleSaveResult> CreateAsync(Guid agentId, AlertRuleInput input, string source, CancellationToken ct) =>
-        SaveAsync(agentId, input, source, existing: null, ct);
+    public Task<AlertRuleSaveResult> CreateAsync(Guid agentId, AlertRuleInput input, string source, CancellationToken ct)
+    {
+        return SaveAsync(agentId, input, source, existing: null, ct);
+    }
 
     /// <summary>Updates a rule by id (the UI). Null if the rule doesn't exist.</summary>
     public async Task<AlertRuleSaveResult?> UpdateAsync(Guid agentId, Guid ruleId, AlertRuleInput input, CancellationToken ct)
@@ -48,7 +85,7 @@ public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepositor
         var rule = await alerts.GetRuleByNameAsync(agentId, name, ct);
         if (rule is null) return $"No rule named '{name}'.";
         if (rule.Source != source) return $"Rule '{rule.Name}' was created by the user; you can't delete it.";
-        await alerts.DeleteRuleAsync(agentId, rule.Id, ct);
+        await DeleteAsync(rule, ct);
         return null;
     }
 
@@ -63,14 +100,16 @@ public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepositor
 
         if (existing is null)
         {
-            var created = await alerts.AddRuleAsync(new AlertRule
+            var created = new AlertRule
             {
                 AgentId = agentId, Name = input.Name!.Trim(), Description = Clean(input.Description),
                 Dataset = input.Dataset!.Trim(), Field = input.Field!.Trim(), Operator = input.Operator!,
                 Threshold = input.Threshold!.Value, ForMinutes = input.ForMinutes ?? 0,
                 Severity = input.Severity ?? AlertSeverity.Warning, Target = target, FilterJson = filterJson,
                 Enabled = enabled, Source = source
-            }, ct);
+            };
+            db.AlertRules.Add(created);
+            await db.SaveChangesAsync(ct);
             return new AlertRuleSaveResult(created, true, []);
         }
 
@@ -92,13 +131,21 @@ public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepositor
         existing.Target = target;
         existing.FilterJson = filterJson;
         existing.Enabled = enabled;
-        await alerts.SaveRuleAsync(existing, ct);
+        existing.UpdatedAt = DateTimeOffset.UtcNow;
 
-        // Switching a rule off closes whatever it had open instead of leaving alerts stuck firing.
-        if (wasEnabled && !enabled)
-            await alerts.ResolveOpenEventsAsync(existing.Id, DateTime.UtcNow, "rule disabled", ct);
-        else if (scopeChanged)
-            await alerts.ResolveOpenEventsAsync(existing.Id, DateTime.UtcNow, "rule changed", ct);
+        // Switching a rule off closes whatever it had open instead of leaving alerts stuck firing. Pending ones never
+        // fired, so they are dropped. Saved with the rule, so the rule and its alerts always agree.
+        var closeReason = wasEnabled && !enabled ? "rule disabled" : scopeChanged ? "rule changed" : null;
+        if (closeReason is not null)
+        {
+            var now = DateTime.UtcNow;
+            foreach (var e in await alerts.GetOpenEventsAsync(existing.Id, ct))
+            {
+                if (e.State == AlertState.Pending) db.AlertEvents.Remove(e);
+                else e.Resolve(now, closeReason);
+            }
+        }
+        await db.SaveChangesAsync(ct);
         return new AlertRuleSaveResult(existing, false, []);
     }
 
@@ -132,7 +179,7 @@ public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepositor
         // Check against what has actually been collected.
         // Collected datasets plus ones a collection job declares but that have no data yet.
         var collected = (await datasets.ListAsync(agentId, ct)).Select(d => d.Name);
-        var declared = jobs is null ? new HashSet<string>() : CollectionJobService.DeclaredDatasets(await jobs.GetAllAsync(agentId, ct));
+        var declared = CollectionJobService.DeclaredDatasets(await jobs.GetAllAsync(agentId, ct));
         var names = collected.Concat(declared).Distinct().Order().ToList();
         if (names.Count == 0) return errors; // nothing collected or declared yet, so there is nothing to check against
         var dataset = i.Dataset.Trim();
@@ -163,8 +210,38 @@ public sealed class AlertRuleService(IAlertsRepository alerts, IDatasetRepositor
         return errors;
     }
 
-    private static bool IsNumeric(JsonNode? node) =>
-        node is JsonValue v && (v.TryGetValue<double>(out _) || v.TryGetValue<bool>(out _));
+    private static bool IsNumeric(JsonNode? node)
+    {
+        return node is JsonValue v && (v.TryGetValue<double>(out _) || v.TryGetValue<bool>(out _));
+    }
 
-    private static string? Clean(string? text) => string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    private static string? Clean(string? text)
+    {
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private async Task DeleteAsync(AlertRule rule, CancellationToken ct)
+    {
+        db.AlertEvents.RemoveRange(await db.AlertEvents.Where(e => e.RuleId == rule.Id).ToListAsync(ct));
+        db.AlertRules.Remove(rule);
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task EnsureDashboardAgent(Guid agentId, CancellationToken ct)
+    {
+        if (!await agents.IsDashboardAlertsAgentAsync(agentId, ct)) throw new NotFoundException($"Agent {agentId} not found.");
+    }
+
+    private static AlertRuleDto ToDtoOrThrow(AlertRuleSaveResult result)
+    {
+        return result.IsValid ? ToDto(result.Rule!) : throw new InvalidRequestException(string.Join(" ", result.Errors));
+    }
+
+    private static AlertRuleDto ToDto(AlertRule r)
+    {
+        return new AlertRuleDto(
+            r.Id, r.AgentId, r.Name, r.Description, r.Dataset, r.Field, r.Operator, r.Threshold, r.ForMinutes, r.Severity, r.Target,
+            string.IsNullOrEmpty(r.FilterJson) ? null : JsonSerializer.Deserialize<Dictionary<string, string>>(r.FilterJson),
+            r.Enabled, r.Source, r.CreatedAt, r.UpdatedAt);
+    }
 }

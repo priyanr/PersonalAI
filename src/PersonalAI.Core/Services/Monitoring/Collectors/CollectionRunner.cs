@@ -1,13 +1,16 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Services.Monitoring.Alerts;
+using PersonalAI.Core.Services.Agents;
 
 namespace PersonalAI.Core.Services.Monitoring.Collectors;
 
@@ -100,7 +103,7 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
                     pairs.AddRange(applicable.Select(c => (job, c)));
                 }
 
-                if (due.Count > 0) await EnsureDatasetsAsync(scope.ServiceProvider.GetRequiredService<IDatasetRepository>(), agentId, due, ct);
+                if (due.Count > 0) await EnsureDatasetsAsync(scope.ServiceProvider.GetRequiredService<DatasetService>(), agentId, due, ct);
             }
             if (due.Count == 0) return new RunResult(false, 0, [], monitoredNames);
 
@@ -149,13 +152,17 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
         }
     }
 
-    private static bool IsDue(CollectionJob job, DateTimeOffset now) =>
-        job.LastRunAt is null || now - job.LastRunAt.Value >= TimeSpan.FromMinutes(job.IntervalMinutes) - DueTolerance;
+    private static bool IsDue(CollectionJob job, DateTimeOffset now)
+    {
+        return job.LastRunAt is null || now - job.LastRunAt.Value >= TimeSpan.FromMinutes(job.IntervalMinutes) - DueTolerance;
+    }
 
-    private static List<string>? TargetNames(CollectionJob job) =>
-        string.IsNullOrEmpty(job.TargetsJson) ? null : JsonSerializer.Deserialize<List<string>>(job.TargetsJson);
+    private static List<string>? TargetNames(CollectionJob job)
+    {
+        return string.IsNullOrEmpty(job.TargetsJson) ? null : JsonSerializer.Deserialize<List<string>>(job.TargetsJson);
+    }
 
-    private static async Task EnsureDatasetsAsync(IDatasetRepository datasets, Guid agentId, IEnumerable<CollectionJob> jobs, CancellationToken ct)
+    private static async Task EnsureDatasetsAsync(DatasetService datasets, Guid agentId, IEnumerable<CollectionJob> jobs, CancellationToken ct)
     {
         // Created up front, sequentially: parallel (job, connection) runs would otherwise race to create the same
         // (agent, name) dataset row.
@@ -171,7 +178,7 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
     private async Task<JobTargetResult> RunPairAsync(Guid agentId, CollectionJob job, DataConnection connection, CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();
-        var datasets = scope.ServiceProvider.GetRequiredService<IDatasetRepository>();
+        var datasets = scope.ServiceProvider.GetRequiredService<DatasetService>();
         var source = scope.ServiceProvider.GetRequiredService<DataSourceRegistry>().Find(job.Tool)!;
 
         var ts = time.GetUtcNow().UtcDateTime;
@@ -242,22 +249,25 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
         if (points.Count == 0) return;
 
         await using var scope = scopes.CreateAsyncScope();
-        await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agentId, points, ct);
+        await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agentId, points, ct);
     }
 
     private async Task RecordJobRunsAsync(
         List<CollectionJob> jobs, IReadOnlyList<JobTargetResult> results, Dictionary<Guid, string> jobErrors, DateTimeOffset startedAt, CancellationToken ct)
     {
         await using var scope = scopes.CreateAsyncScope();
-        var repo = scope.ServiceProvider.GetRequiredService<ICollectionJobsRepository>();
-        foreach (var job in jobs)
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var ids = jobs.Select(j => j.Id).ToList();
+        var stored = await db.CollectionJobs.Where(j => ids.Contains(j.Id)).ToListAsync(ct);
+        foreach (var job in stored)
         {
             var mine = results.Where(r => r.JobId == job.Id).ToList();
             var firstError = mine.FirstOrDefault(r => r.Error is not null);
             var error = jobErrors.GetValueOrDefault(job.Id) ?? (firstError is null ? null : $"{firstError.Target}: {firstError.Error}");
             // LastRunAt is the start of the pass, so the next one stays on cadence however long this one took.
-            await repo.RecordRunAsync(job.Id, startedAt, mine.Sum(r => r.Rows), error, ct);
+            job.RecordRun(startedAt, mine.Sum(r => r.Rows), error);
         }
+        await db.SaveChangesAsync(ct);
     }
 
     // ---- dry run and ad-hoc requests ------------------------------------------------
@@ -346,8 +356,8 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
     {
         await using var scope = scopes.CreateAsyncScope();
         var cutoff = time.GetUtcNow().UtcDateTime.AddDays(-config.RetentionDays);
-        var points = await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().PruneAsync(agentId, cutoff, ct);
-        var alerts = await scope.ServiceProvider.GetRequiredService<IAlertsRepository>().PruneResolvedAsync(agentId, cutoff, ct);
+        var points = await scope.ServiceProvider.GetRequiredService<DatasetService>().PruneAsync(agentId, cutoff, ct);
+        var alerts = await scope.ServiceProvider.GetRequiredService<AlertsService>().PruneResolvedAsync(agentId, cutoff, ct);
         return points + alerts;
     }
 
@@ -396,12 +406,15 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
         return points;
     }
 
-    private static DatasetKind KindOf(string? kind) => kind switch
+    private static DatasetKind KindOf(string? kind)
     {
-        "snapshot" => DatasetKind.Snapshot,
-        "event" => DatasetKind.Event,
-        _ => DatasetKind.Timeseries
-    };
+        return kind switch
+        {
+            "snapshot" => DatasetKind.Snapshot,
+            "event" => DatasetKind.Event,
+            _ => DatasetKind.Timeseries
+        };
+    }
 
     private static string? Failure(DataSourceResult r)
     {
@@ -409,5 +422,8 @@ public sealed class CollectionRunner(IServiceScopeFactory scopes, TimeProvider t
         return r.ExitCode == 0 ? null : $"Request failed with code {r.ExitCode}: {r.Stderr.Trim()}";
     }
 
-    private static string Cap(string text) => text.Length <= MaxOutputChars ? text : text[..MaxOutputChars];
+    private static string Cap(string text)
+    {
+        return text.Length <= MaxOutputChars ? text : text[..MaxOutputChars];
+    }
 }

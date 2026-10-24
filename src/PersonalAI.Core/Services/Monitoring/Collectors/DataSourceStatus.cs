@@ -19,8 +19,10 @@ public static class DataSourceStatus
 
     public static readonly DatasetDefinition Definition = new(DatasetName, DatasetKind.Timeseries, SchemaHint);
 
-    public static NewDataPoint Point(DataConnection connection, string tool, bool available, string? error, DateTime ts) =>
-        new(DatasetName, DatasetKind.Timeseries, connection.Id.ToString(), ts, available
+    public static NewDataPoint Point(DataConnection connection, string tool, bool available, string? error, DateTime ts)
+    {
+        return new(DatasetName, DatasetKind.Timeseries, connection.Id.ToString(), ts, available
             ? JsonSerializer.Serialize(new { target = connection.Name, tool, available })
             : JsonSerializer.Serialize(new { target = connection.Name, tool, available, error }));
+    }
 }

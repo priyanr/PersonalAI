@@ -23,9 +23,11 @@ public class ChatAgentServiceOutputLimitTests
         new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 
     private static ChatAgentService CreateService(AppDbContext db, FakeAIProvider provider, ToolRegistry? tools = null) => new(
+        db,
         new ChatSessionRepository(db),
         new SkillsRepository(db),
-        new FakeSkillExecutionService((_, _) => []),
+        new FakeSkillProvider().CreateService(db),
+        new ChatHistoryCompaction(db, new AIProviderRegistry([(IAIProvider)provider]), Options.Create(new AgentSettings { MaxIterations = 25 })),
         new AIProviderRegistry([(IAIProvider)provider]),
         tools ?? new ToolRegistry([]),
         Options.Create(new OllamaSettings { BaseUrl = "http://localhost:11434", DefaultSystemPrompt = "system" }),
@@ -45,7 +47,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "deepseek-flash", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "deepseek-flash", CancellationToken.None);
 
         var provider = new FakeAIProvider([
             new AiChatChunk(null, null, false, ReasoningDelta: "Let me plan the whole app..."),
@@ -72,7 +74,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var service = CreateService(db, new FakeAIProvider([new AiChatChunk("  ", null, true)]));
 
@@ -89,7 +91,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var service = CreateService(db, new FakeAIProvider([
             new AiChatChunk("Here is a very long answer", null, false),
@@ -110,7 +112,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk(null, [new AiToolCall("call1", "test_tool", """{"content":"partial fi""")], true, HitOutputLimit: true)],
@@ -129,7 +131,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "qwen3:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "qwen3:8b", CancellationToken.None);
 
         var service = CreateService(db, new FakeAIProvider([
             new AiChatChunk(null, null, false, ReasoningDelta: "hmm"),
@@ -149,7 +151,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk(null, null, true, HitOutputLimit: true)],
@@ -170,7 +172,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var service = CreateService(db, new FakeAIProvider([new AiChatChunk(null, null, true, HitOutputLimit: true)]));
 
@@ -184,7 +186,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var ran = false;
         var provider = new FakeAIProvider(
@@ -204,7 +206,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [
@@ -228,7 +230,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("Hi", null, true)]);
         var service = CreateService(db, provider);
@@ -243,7 +245,7 @@ public class ChatAgentServiceOutputLimitTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "gpt-oss:20b", CancellationToken.None, reasoningEffort: "high");
+        var session = await TestSeed.SessionAsync(db, null, "gpt-oss:20b", CancellationToken.None, reasoningEffort: "high");
 
         var provider = new FakeAIProvider([new AiChatChunk("Hi", null, true)]);
         var service = CreateService(db, provider);

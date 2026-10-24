@@ -4,6 +4,7 @@ using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Services.Agents.Types;
 using PersonalAI.Core.Services.Monitoring;
 using Microsoft.Extensions.DependencyInjection;
+using PersonalAI.Core.Services.Agents;
 
 namespace PersonalAI.Core.Tools;
 
@@ -14,11 +15,15 @@ internal static class MonitoringToolSupport
 {
     public const int MaxOutputChars = 14000;
 
-    public static ToolCompleted NotAvailable() =>
-        new("This tool is only available to Dashboard & Alerts agents.", IsError: true);
+    public static ToolCompleted NotAvailable()
+    {
+        return new("This tool is only available to Dashboard & Alerts agents.", IsError: true);
+    }
 
-    public static string Truncate(string text) =>
-        text.Length <= MaxOutputChars ? text : text[..MaxOutputChars] + "\n…[output truncated; narrow the request]";
+    public static string Truncate(string text)
+    {
+        return text.Length <= MaxOutputChars ? text : text[..MaxOutputChars] + "\n…[output truncated; narrow the request]";
+    }
 
     /// <summary>Resolves a connection name among the connections this agent is scoped to, across all of its data
     /// sources, never the whole fleet: names are only unique within a group, so a global lookup could return another

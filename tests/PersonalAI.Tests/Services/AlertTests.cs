@@ -1,3 +1,5 @@
+using PersonalAI.Core.Models;
+using PersonalAI.Core.Services.Monitoring.Collectors;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -36,6 +38,10 @@ public class AlertEvaluatorTests
             services.AddScoped<IDatasetRepository, DatasetRepository>();
             services.AddScoped<IAlertsRepository, AlertsRepository>();
             services.AddScoped<AlertRuleService>();
+            services.AddScoped<AlertsService>();
+            services.AddScoped<DatasetService>();
+            services.AddScoped<IAgentsRepository, AgentsRepository>();
+            services.AddScoped<ICollectionJobsRepository, CollectionJobsRepository>();
             services.AddSingleton<Microsoft.Extensions.Logging.ILogger<AlertEvaluator>>(NullLogger<AlertEvaluator>.Instance);
             services.AddScoped<AlertEvaluator>();
             Provider = services.BuildServiceProvider();
@@ -44,14 +50,17 @@ public class AlertEvaluatorTests
 
         public IServiceProvider S => _scope.ServiceProvider;
         public IAlertsRepository Alerts => S.GetRequiredService<IAlertsRepository>();
+        public AlertsService AlertsSvc => S.GetRequiredService<AlertsService>();
         public AlertEvaluator Evaluator => S.GetRequiredService<AlertEvaluator>();
 
         public Task Sample(string target, DateTime ts, double cpu, bool reachable = true) =>
-            S.GetRequiredService<IDatasetRepository>().AddPointsAsync(AgentId,
+            S.GetRequiredService<DatasetService>().AddPointsAsync(AgentId,
                 [new("system", DatasetKind.Timeseries, target, ts, JsonSerializer.Serialize(new { target, reachable, cpuPercent = cpu }))], default);
 
         public async Task<AlertRule> Rule(string name = "High CPU", string field = "cpuPercent", string op = "gte", double threshold = 90, int forMinutes = 0, string? target = null)
         {
+        // A rule may only name a dataset that exists (or a job declares), as in production.
+            await S.GetRequiredService<DatasetService>().EnsureDatasetsAsync(AgentId, [new("system", DatasetKind.Timeseries, null)], default);
             var r = await S.GetRequiredService<AlertRuleService>().CreateAsync(AgentId,
                 new(name, null, "system", field, op, threshold, forMinutes, "critical", target, null, true), AlertSources.User, default);
             r.Errors.Should().BeEmpty();
@@ -211,12 +220,12 @@ public class AlertEvaluatorTests
         await f.Eval(T0);
         var id = (await f.Events()).Single().Id;
 
-        (await f.Alerts.AcknowledgeAsync(id, default)).Should().BeTrue();
+        await f.AlertsSvc.Acknowledge(id, default);
         await f.Sample("web-1", T0.AddMinutes(5), 99);
         await f.Eval(T0.AddMinutes(5));
 
         (await f.Events()).Single().Acknowledged.Should().BeTrue();
-        (await f.Alerts.AcknowledgeAsync(Guid.NewGuid(), default)).Should().BeFalse();
+        await FluentActions.Awaiting(() => f.AlertsSvc.Acknowledge(Guid.NewGuid(), default)).Should().ThrowAsync<NotFoundException>();
     }
 
     [Fact]
@@ -227,15 +236,15 @@ public class AlertEvaluatorTests
         await f.Sample("web-1", T0, 95);
         await f.Eval(T0);
         var id = (await f.Events()).Single().Id;
-        await f.Alerts.AcknowledgeAsync(id, default);
+        await f.AlertsSvc.Acknowledge(id, default);
 
-        (await f.Alerts.UnacknowledgeAsync(id, default)).Should().BeTrue();
+        await f.AlertsSvc.Unacknowledge(id, default);
 
         var e = (await f.Events()).Single();
         e.Acknowledged.Should().BeFalse();
         e.AcknowledgedAt.Should().BeNull();
         (await f.Alerts.GetSummaryAsync(default)).Unacknowledged.Should().Be(1);
-        (await f.Alerts.UnacknowledgeAsync(Guid.NewGuid(), default)).Should().BeFalse();
+        await FluentActions.Awaiting(() => f.AlertsSvc.Unacknowledge(Guid.NewGuid(), default)).Should().ThrowAsync<NotFoundException>();
     }
 
     [Fact]
@@ -247,18 +256,18 @@ public class AlertEvaluatorTests
         await f.Sample("web-2", T0, 96);
         await f.Eval(T0);
         var first = (await f.Events()).First();
-        await f.Alerts.AcknowledgeAsync(first.Id, default);
+        await f.AlertsSvc.Acknowledge(first.Id, default);
         var before = await f.Alerts.GetSummaryAsync(default);
         before.Should().Be(new AlertSummary(Firing: 2, Critical: 2, Warning: 0, Unacknowledged: 1, UnacknowledgedCritical: 1));
 
-        (await f.Alerts.AcknowledgeAllAsync(null, default)).Should().Be(1);
-        (await f.Alerts.AcknowledgeAllAsync(null, default)).Should().Be(0);
+        (await f.AlertsSvc.AcknowledgeAll(null, default)).Acknowledged.Should().Be(1);
+        (await f.AlertsSvc.AcknowledgeAll(null, default)).Acknowledged.Should().Be(0);
 
         var after = await f.Alerts.GetSummaryAsync(default);
         after.Firing.Should().Be(2);
         after.Unacknowledged.Should().Be(0);
         after.UnacknowledgedCritical.Should().Be(0);
-        (await f.Alerts.AcknowledgeAllAsync(Guid.NewGuid(), default)).Should().Be(0); // another agent: nothing to do
+        (await f.AlertsSvc.AcknowledgeAll(Guid.NewGuid(), default)).Acknowledged.Should().Be(0); // another agent: nothing to do
     }
 
     [Fact]
@@ -268,7 +277,7 @@ public class AlertEvaluatorTests
         await f.Rule();
         await f.Sample("web-1", T0, 95);
         await f.Eval(T0);
-        await f.Alerts.AcknowledgeAsync((await f.Events()).Single().Id, default);
+        await f.AlertsSvc.Acknowledge((await f.Events()).Single().Id, default);
 
         await f.Sample("web-1", T0.AddMinutes(5), 40);
         await f.Eval(T0.AddMinutes(5));
@@ -290,7 +299,7 @@ public class AlertEvaluatorTests
         await f.Sample("web-1", T0, 95);
         await f.Eval(T0);
 
-        (await f.Alerts.DeleteRuleAsync(f.AgentId, rule.Id, default)).Should().BeTrue();
+        await f.S.GetRequiredService<AlertRuleService>().DeleteRuleAsync(f.AgentId, rule.Id, default);
 
         (await f.Events()).Should().BeEmpty();
         (await f.Alerts.GetRulesAsync(f.AgentId, default)).Should().BeEmpty();
@@ -317,10 +326,13 @@ public class AlertRuleServiceTests
         services.AddScoped<IDatasetRepository, DatasetRepository>();
         services.AddScoped<IAlertsRepository, AlertsRepository>();
         services.AddScoped<AlertRuleService>();
+        services.AddScoped<DatasetService>();
+        services.AddScoped<IAgentsRepository, AgentsRepository>();
+        services.AddScoped<ICollectionJobsRepository, CollectionJobsRepository>();
         var provider = services.BuildServiceProvider();
         var agent = Guid.NewGuid();
         await using var scope = provider.CreateAsyncScope();
-        await scope.ServiceProvider.GetRequiredService<IDatasetRepository>().AddPointsAsync(agent,
+        await scope.ServiceProvider.GetRequiredService<DatasetService>().AddPointsAsync(agent,
         [
             new("system", DatasetKind.Timeseries, "a", DateTime.UtcNow, JsonSerializer.Serialize(new { target = "web-1", reachable = true, cpuPercent = 10.0, note = "text" })),
             new("disk", DatasetKind.Timeseries, "a|/", DateTime.UtcNow, JsonSerializer.Serialize(new { target = "web-1", mount = "/", usedPercent = 50.0 }))
@@ -457,10 +469,11 @@ public class AlertsRepositorySqliteTests
         await using var _ = db;
         await using var __ = conn;
 
-        var agent = await new AgentsRepository(db).CreateAsync("a", null, "p", "ollama", "m", null, [], [], null,
+        var agent = await TestSeed.AgentAsync(db, "a", null, "p", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, default, null, AgentType.DashboardAlerts, "{}");
         var repo = new AlertsRepository(db);
-        var rule = await repo.AddRuleAsync(new AlertRule { AgentId = agent.Id, Name = "r", Dataset = "system", Field = "cpuPercent", Operator = "gte" }, default);
+        var rule = new AlertRule { AgentId = agent.Id, Name = "r", Dataset = "system", Field = "cpuPercent", Operator = "gte" };
+        db.AlertRules.Add(rule);
 
         var now = DateTime.UtcNow;
         AlertEvent Make(string key, AlertState state, DateTime fired, DateTime? resolved = null) => new()
@@ -468,17 +481,18 @@ public class AlertsRepositorySqliteTests
             RuleId = rule.Id, AgentId = agent.Id, EntityKey = key, EntityLabel = key, State = state, Message = key,
             FirstSeen = fired, FiredAt = fired, LastSeen = fired, ResolvedAt = resolved
         };
-        await repo.AddEventAsync(Make("old-firing", AlertState.Firing, now.AddHours(-5)), default);
-        await repo.AddEventAsync(Make("new-firing", AlertState.Firing, now.AddHours(-1)), default);
-        await repo.AddEventAsync(Make("recent-resolved", AlertState.Resolved, now.AddHours(-3), now.AddHours(-2)), default);
-        await repo.AddEventAsync(Make("ancient-resolved", AlertState.Resolved, now.AddDays(-40), now.AddDays(-40)), default);
-        await repo.AddEventAsync(Make("pending", AlertState.Pending, now), default);
+        db.AlertEvents.Add(Make("old-firing", AlertState.Firing, now.AddHours(-5)));
+        db.AlertEvents.Add(Make("new-firing", AlertState.Firing, now.AddHours(-1)));
+        db.AlertEvents.Add(Make("recent-resolved", AlertState.Resolved, now.AddHours(-3), now.AddHours(-2)));
+        db.AlertEvents.Add(Make("ancient-resolved", AlertState.Resolved, now.AddDays(-40), now.AddDays(-40)));
+        db.AlertEvents.Add(Make("pending", AlertState.Pending, now));
+        await db.SaveChangesAsync();
 
         var shown = await repo.GetEventsAsync(agent.Id, true, now.AddDays(-7), default);
         shown.Select(e => e.EntityKey).Should().Equal("new-firing", "old-firing", "recent-resolved");
         shown[0].FiredAt!.Value.Kind.Should().Be(DateTimeKind.Utc);
 
-        (await repo.PruneResolvedAsync(agent.Id, now.AddDays(-30), default)).Should().Be(1);
+        (await new AlertsService(db, repo, new AgentsRepository(db)).PruneResolvedAsync(agent.Id, now.AddDays(-30), default)).Should().Be(1);
         (await repo.GetOpenEventsAsync(rule.Id, default)).Should().HaveCount(3); // 2 firing + pending
     }
 }

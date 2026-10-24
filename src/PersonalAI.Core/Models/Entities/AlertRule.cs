@@ -11,21 +11,27 @@ public static class AlertOperators
     public const string Gt = "gt", Gte = "gte", Lt = "lt", Lte = "lte", Eq = "eq", Ne = "ne";
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal) { Gt, Gte, Lt, Lte, Eq, Ne };
 
-    public static bool Compare(double value, string op, double threshold) => op switch
+    public static bool Compare(double value, string op, double threshold)
     {
-        Gt => value > threshold,
-        Gte => value >= threshold,
-        Lt => value < threshold,
-        Lte => value <= threshold,
-        Eq => Math.Abs(value - threshold) < 1e-9,
-        Ne => Math.Abs(value - threshold) >= 1e-9,
-        _ => false
-    };
+        return op switch
+        {
+            Gt => value > threshold,
+            Gte => value >= threshold,
+            Lt => value < threshold,
+            Lte => value <= threshold,
+            Eq => Math.Abs(value - threshold) < 1e-9,
+            Ne => Math.Abs(value - threshold) >= 1e-9,
+            _ => false
+        };
+    }
 
-    public static string Symbol(string op) => op switch
+    public static string Symbol(string op)
     {
-        Gt => ">", Gte => "≥", Lt => "<", Lte => "≤", Eq => "=", Ne => "≠", _ => op
-    };
+        return op switch
+        {
+            Gt => ">", Gte => "≥", Lt => "<", Lte => "≤", Eq => "=", Ne => "≠", _ => op
+        };
+    }
 }
 
 public static class AlertSources
@@ -107,4 +113,18 @@ public class AlertEvent
 
     /// <summary>Reserved for notifications (a later step): the outcome of running the rule's action.</summary>
     public string? ActionStatus { get; set; }
+
+    /// <summary>An alert message is capped at 500 characters: it is shown in lists and the nav badge.</summary>
+    public static string CapMessage(string text)
+    {
+        return text.Length <= 500 ? text : text[..497] + "...";
+    }
+
+    /// <summary>Closes a fired alert, saying why in its message. A pending one never fired: callers delete it instead.</summary>
+    public void Resolve(DateTime at, string reason)
+    {
+        State = AlertState.Resolved;
+        ResolvedAt = at;
+        Message = CapMessage($"{Message} — resolved: {reason}");
+    }
 }

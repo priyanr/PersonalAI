@@ -59,8 +59,10 @@ public record DashboardAlertsConfig
     public Dictionary<string, List<Guid>> ToolScopes { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The scope items selected for a tool; empty when the tool is not enabled for this agent.</summary>
-    public IReadOnlyCollection<Guid> ScopeFor(string tool) =>
-        ToolScopes.FirstOrDefault(p => string.Equals(p.Key, tool, StringComparison.OrdinalIgnoreCase)).Value ?? [];
+    public IReadOnlyCollection<Guid> ScopeFor(string tool)
+    {
+        return ToolScopes.FirstOrDefault(p => string.Equals(p.Key, tool, StringComparison.OrdinalIgnoreCase)).Value ?? [];
+    }
 
     /// <summary>Default interval, in minutes, for model-created jobs that don't set their own. Jobs run on their own intervals with no model involved.</summary>
     public int CollectIntervalMinutes { get; init; } = 5;

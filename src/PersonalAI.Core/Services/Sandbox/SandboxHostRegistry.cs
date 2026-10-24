@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using System.Text;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Models.Settings;
@@ -10,16 +11,9 @@ using Microsoft.Extensions.Options;
 
 namespace PersonalAI.Core.Services.Sandbox;
 
-/// <summary>Singleton owning the one live WebSocket connection PersonalAI.SandboxHost dials in with —
-/// Kubernetes pins the API to a single replica specifically so this can be a singleton (see CLAUDE.md's
-/// Risks section; a Redis-relay ISandboxHostClient would be the way out of that if it's ever needed).
-/// Wraps a WebSocketFrameTransport + the shared SandboxFramePump for the wire protocol underneath the
-/// ISandboxHostClient calls the (later-phase) SandboxTool makes.
-///
-/// The HostHello/HostHelloAck handshake happens directly over the transport, before a SandboxFramePump
-/// exists for it: the pump's correlation model is "this side sends a request, the other side echoes the
-/// RequestId back", which fits every message the API subsequently initiates (ListSandboxes, CreateSandbox,
-/// Exec, FileOp, Destroy, Heartbeat) but not the broker's own unprompted opening frame.</summary>
+/// <summary>Owns the one WebSocket connection the sandbox host dials in with (the API runs as a single replica so this
+/// can be a singleton) and implements ISandboxHostClient over it. The hello handshake is done on the raw transport
+/// before the request/response pump starts, because the host's opening frame isn't an answer to a request.</summary>
 public sealed class SandboxHostRegistry(
     IOptions<SandboxSettings> settings,
     IServiceScopeFactory scopeFactory,
@@ -62,22 +56,28 @@ public sealed class SandboxHostRegistry(
     /// controller from HttpContext.Connection.RemoteIpAddress (or a trusted X-Forwarded-For, already
     /// resolved by Program.cs's UseForwardedHeaders) at accept time — the registry has no HttpContext of
     /// its own to read it from later.</summary>
-    public Task HandleConnectionAsync(WebSocket socket, string? remoteIp, CancellationToken ct) =>
-        RunConnectionAsync(new WebSocketFrameTransport(socket, MaxFrameBytesFor(settings.Value)), socket, remoteIp, ct);
+    public Task HandleConnectionAsync(WebSocket socket, string? remoteIp, CancellationToken ct)
+    {
+        return RunConnectionAsync(new WebSocketFrameTransport(socket, MaxFrameBytesFor(settings.Value)), socket, remoteIp, ct);
+    }
 
     /// <summary>Thin adapter over SandboxFrameLimits.MaxFrameBytesFor — kept as its own overload so callers
     /// (and MaxFrameBytesTests) can pass a SandboxSettings directly rather than pulling its two fields out
     /// by hand. See SandboxFrameLimits' own doc comment for why the actual formula lives there and not
     /// here or in BrokerConnection's identically-shaped overload.</summary>
-    public static int MaxFrameBytesFor(SandboxSettings settings) =>
-        SandboxFrameLimits.MaxFrameBytesFor(settings.MaxZipBytes, settings.MaxDownloadBytes);
+    public static int MaxFrameBytesFor(SandboxSettings settings)
+    {
+        return SandboxFrameLimits.MaxFrameBytesFor(settings.MaxZipBytes, settings.MaxDownloadBytes);
+    }
 
     /// <summary>Test seam: drives the identical handshake/reconcile/heartbeat lifecycle over a fake
     /// transport, with no real socket. Internal because production code only ever has a WebSocket to
     /// offer — see SandboxHostRegistryTests. <paramref name="remoteIp"/> defaults to null so every
     /// existing two-argument call site keeps compiling unchanged.</summary>
-    internal Task RunConnectionAsync(IFrameTransport transport, CancellationToken ct, string? remoteIp = null) =>
-        RunConnectionAsync(transport, socket: null, remoteIp, ct);
+    internal Task RunConnectionAsync(IFrameTransport transport, CancellationToken ct, string? remoteIp = null)
+    {
+        return RunConnectionAsync(transport, socket: null, remoteIp, ct);
+    }
 
     private async Task RunConnectionAsync(IFrameTransport transport, WebSocket? socket, string? remoteIp, CancellationToken ct)
     {
@@ -236,12 +236,10 @@ public sealed class SandboxHostRegistry(
                     result.Instance!.Status = SandboxInstanceStatus.Running;
                     result.Instance.ContainerId = result.ContainerId;
                     result.Instance.LastUsedAt = timeProvider.GetUtcNow();
-                    await repository.UpdateAsync(result.Instance, ct);
                     break;
 
                 case SandboxReconciler.Transition.MarkOrphaned:
                     result.Instance!.Status = SandboxInstanceStatus.Orphaned;
-                    await repository.UpdateAsync(result.Instance, ct);
                     break;
 
                 case SandboxReconciler.Transition.Untracked:
@@ -251,6 +249,7 @@ public sealed class SandboxHostRegistry(
                     break;
             }
         }
+        await scope.ServiceProvider.GetRequiredService<AppDbContext>().SaveChangesAsync(ct);
     }
 
     public async Task<SandboxEnsureResult> EnsureSandboxAsync(Guid sandboxId, SandboxKind kind, Guid ownerId, string image, IReadOnlyList<int> preferredPorts, CancellationToken ct)
@@ -336,6 +335,8 @@ public sealed class SandboxHostRegistry(
             throw new InvalidOperationException(failed.Error ?? "The sandbox host failed to destroy the sandbox.");
     }
 
-    private Connection RequireConnection() =>
-        Current ?? throw new SandboxHostDisconnectedException("No sandbox host is connected.");
+    private Connection RequireConnection()
+    {
+        return Current ?? throw new SandboxHostDisconnectedException("No sandbox host is connected.");
+    }
 }

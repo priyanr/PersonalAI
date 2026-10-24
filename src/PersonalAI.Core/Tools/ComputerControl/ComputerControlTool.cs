@@ -3,15 +3,9 @@ using PersonalAI.Core.Tools.ComputerControl.Services;
 
 namespace PersonalAI.Core.Tools.ComputerControl;
 
-/// <summary>Whole-desktop mouse/keyboard/screen control for the model. Off by default and gated
-/// per-session via ChatSession.ComputerControlEnabled — the same posture as network_scan — since this
-/// tool can control the entire host machine, not just the user's workspace sandbox.
-///
-/// The chat pipeline is text-only end-to-end and DeepSeek has no vision model, so `screenshot` does
-/// not hand the model an image: it saves a PNG for the human and returns a text UI Automation
-/// element tree instead. The model is expected to read x/y coordinates off that text and pass them
-/// back explicitly on subsequent move/click/drag calls — this tool keeps no session/cached state of
-/// its own between calls.</summary>
+/// <summary>Mouse, keyboard and screen control of the whole host machine; off by default and switched on per chat.
+/// The chat is text only, so `screenshot` saves a PNG for the person and gives the model a text tree of UI elements,
+/// whose x/y coordinates it passes back on later clicks. Nothing is kept between calls.</summary>
 public sealed class ComputerControlTool(
     IMouseInputService mouse,
     IKeyboardInputService keyboard,

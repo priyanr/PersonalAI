@@ -1,3 +1,4 @@
+using PersonalAI.Core.Models;
 using System.Text.Json;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
@@ -83,6 +84,10 @@ internal sealed class JobHarness : IAsyncDisposable
         services.AddScoped<AlertRuleService>();
         services.AddScoped<DashboardService>();
         services.AddScoped<CollectionJobService>();
+        services.AddSingleton<TimeProvider>(Time);
+        services.AddScoped<DatasetService>();
+        services.AddScoped<AlertsService>();
+        services.AddSingleton(sp => new CollectionRunner(sp.GetRequiredService<IServiceScopeFactory>(), Time, NullLogger<CollectionRunner>.Instance));
         services.AddSingleton<ILogger<AlertEvaluator>>(NullLogger<AlertEvaluator>.Instance);
         services.AddScoped<AlertEvaluator>();
         services.AddSingleton<ISshRunner>(Ssh);
@@ -93,21 +98,21 @@ internal sealed class JobHarness : IAsyncDisposable
         configure?.Invoke(services);
         Provider = services.BuildServiceProvider();
 
-        Runner = new CollectionRunner(Provider.GetRequiredService<IServiceScopeFactory>(), Time, NullLogger<CollectionRunner>.Instance);
+        Runner = Provider.GetRequiredService<CollectionRunner>();
         SeedAsync(requireApproval, type).GetAwaiter().GetResult();
     }
 
     private async Task SeedAsync(bool requireApproval, AgentType type)
     {
         await using var scope = Provider.CreateAsyncScope();
-        var servers = scope.ServiceProvider.GetRequiredService<ISshServersRepository>();
-        var group = await servers.CreateGroupAsync("prod", null, default);
-        ServerId = (await servers.CreateServerAsync(group.Id, "web-1", "10.0.0.5", 22, "root", "SSH_K", true, default))!.Id;
-        await servers.CreateServerAsync(group.Id, "off", "10.0.0.6", 22, "root", "SSH_K", false, default);
+        var seedDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var group = await TestSeed.SshGroupAsync(seedDb, "prod", null, default);
+        ServerId = (await TestSeed.SshServerAsync(seedDb, group.Id, "web-1", "10.0.0.5", 22, "root", "SSH_K", true, default))!.Id;
+        await TestSeed.SshServerAsync(seedDb, group.Id, "off", "10.0.0.6", 22, "root", "SSH_K", false, default);
         var toolScopes = new Dictionary<string, Guid[]>(_extraScopes ?? new Dictionary<string, Guid[]>());
         if (_scopeSsh) toolScopes["ssh"] = [group.Id];
         var config = JsonSerializer.Serialize(new { toolScopes, requireJobApproval = requireApproval, collectIntervalMinutes = _defaultInterval ?? 5 });
-        AgentId = (await scope.ServiceProvider.GetRequiredService<IAgentsRepository>().CreateAsync(
+        AgentId = (await TestSeed.AgentAsync(scope.ServiceProvider.GetRequiredService<AppDbContext>(), 
             "mon", null, "p", "ollama", "m", null, [], [], null, AgentScheduleKind.Manual, null, null, null, true, default,
             null, type, config)).Id;
     }
@@ -119,12 +124,19 @@ internal sealed class JobHarness : IAsyncDisposable
         return await action(scope.ServiceProvider);
     }
 
-    public Task<IReadOnlyList<CollectionJob>> Jobs() => With(sp => sp.GetRequiredService<ICollectionJobsRepository>().GetAllAsync(AgentId, default));
+    public Task<List<CollectionJob>> Jobs() => With(sp => sp.GetRequiredService<ICollectionJobsRepository>().GetAllAsync(AgentId, default));
     /// <summary>Approves as the UI does: with the token of the job as it currently is. Null if it could not be approved.</summary>
-    public async Task<CollectionJob?> Approve(Guid jobId)
+    public async Task<CollectionJobDto?> Approve(Guid jobId)
     {
         var job = (await Jobs()).Single(j => j.Id == jobId);
-        return (await With(sp => sp.GetRequiredService<CollectionJobService>().ApproveAsync(AgentId, jobId, CollectionJobService.ApprovalToken(job), default))).Job;
+        try
+        {
+            return await With(sp => sp.GetRequiredService<CollectionJobService>().ApproveAsync(AgentId, jobId, CollectionJobService.ApprovalToken(job), default));
+        }
+        catch (ConflictException)
+        {
+            return null;
+        }
     }
 
     /// <summary>Saves a job and approves it if it is waiting, so it is active. Null if it could not be saved or approved.</summary>
@@ -132,7 +144,8 @@ internal sealed class JobHarness : IAsyncDisposable
     {
         var saved = await Save(input);
         if (saved.Job is null) return null;
-        return saved.Job.Status == JobStatus.PendingApproval ? await Approve(saved.Job.Id) : saved.Job;
+        if (saved.Job.Status != JobStatus.PendingApproval) return saved.Job;
+        return await Approve(saved.Job.Id) is null ? null : (await Jobs()).Single(j => j.Id == saved.Job.Id);
     }
 
     /// <summary>Two active jobs: "Disk usage" every 5 minutes and "Daily disk" every 1440.</summary>
@@ -592,7 +605,7 @@ public class CollectionJobServiceTests
     {
         await using var h = new JobHarness();
         var job = (await h.Save(JobHarness.DiskJob())).Job!;
-        var svc = (Func<Task<CollectionJob?>>)(() => h.Approve(job.Id));
+        var svc = (Func<Task<CollectionJobDto?>>)(() => h.Approve(job.Id));
 
         h.Cache.SetTool("ssh", new Dictionary<string, string?> { ["AllowedCommands"] = "uptime" });
         (await svc()).Should().BeNull();
@@ -610,7 +623,8 @@ public class CollectionJobServiceTests
         var job = (await h.Save(JobHarness.DiskJob())).Job!;
         var svc = h.Provider;
 
-        (await h.With(sp => sp.GetRequiredService<CollectionJobService>().SetEnabledAsync(h.AgentId, job.Id, true, default))).Should().BeNull();
+        await FluentActions.Awaiting(() => h.With(sp => sp.GetRequiredService<CollectionJobService>().SetEnabledAsync(h.AgentId, job.Id, true, default)))
+            .Should().ThrowAsync<ConflictException>();
 
         await h.Approve(job.Id);
         (await h.With(sp => sp.GetRequiredService<CollectionJobService>().SetEnabledAsync(h.AgentId, job.Id, false, default)))!.Status.Should().Be(JobStatus.Disabled);
@@ -668,16 +682,6 @@ public class SshGuardProviderTests
 
         cache.SetTool("ssh", new Dictionary<string, string?> { ["AllowedCommands"] = "  " });
         provider.Current.Check("df").Allowed.Should().BeTrue();
-    }
-
-    [Fact]
-    public void TheSameTextReusesTheSameGuard()
-    {
-        var cache = new ToolConfigCache();
-        cache.SetTool("ssh", new Dictionary<string, string?> { ["AllowedCommands"] = "df" });
-        var provider = new SshGuardProvider(cache);
-
-        provider.Current.Should().BeSameAs(provider.Current);
     }
 }
 
@@ -927,10 +931,9 @@ public class OutsideAllowlistTests
         await h.Approve(job.Id);
         await h.With(async sp =>
         {
-            var repo = sp.GetRequiredService<ICollectionJobsRepository>();
-            var stored = (await repo.GetAsync(h.AgentId, job.Id, default))!;
+            var stored = (await sp.GetRequiredService<ICollectionJobsRepository>().GetAsync(h.AgentId, job.Id, default))!;
             stored.OutsideAllowlist = false; // e.g. the row was edited behind the app's back
-            await repo.SaveAsync(stored, default);
+            await sp.GetRequiredService<AppDbContext>().SaveChangesAsync();
             return 0;
         });
 

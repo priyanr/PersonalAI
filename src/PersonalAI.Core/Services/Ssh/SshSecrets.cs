@@ -9,10 +9,14 @@ public static class SshSecrets
 {
     public const string Prefix = "SSH_";
 
-    public static bool IsAllowed(string? secretName) =>
-        secretName is not null && secretName.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) && secretName.Length > Prefix.Length;
+    public static bool IsAllowed(string? secretName)
+    {
+        return secretName is not null && secretName.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase) && secretName.Length > Prefix.Length;
+    }
 
-    public static string NotAllowedMessage(string secretName) =>
-        $"Secret '{secretName}' can't be used for SSH. Only secrets named {Prefix}<something> (for example {Prefix}HOMELAB_KEY) " +
+    public static string NotAllowedMessage(string secretName)
+    {
+        return $"Secret '{secretName}' can't be used for SSH. Only secrets named {Prefix}<something> (for example {Prefix}HOMELAB_KEY) " +
         "can be used by servers; create one on the Secrets page.";
+    }
 }

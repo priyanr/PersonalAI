@@ -1,3 +1,4 @@
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 
 namespace PersonalAI.Core.Services.Ssh;
@@ -5,7 +6,7 @@ namespace PersonalAI.Core.Services.Ssh;
 /// <summary>SSH as a data source: its connections are the servers in server groups, a scope item is a group (current
 /// and future members), a request is one command checked by the allowlist guard, and running it also records the
 /// server's status (last seen or error, and the pinned host key on first success).</summary>
-public sealed class SshDataSource(ISshServersRepository servers, ISshRunner ssh, SshGuardProvider guards) : IDataSource
+public sealed class SshDataSource(AppDbContext db, ISshServersRepository servers, ISshRunner ssh, SshGuardProvider guards) : IDataSource
 {
     public string ToolName => SshGuardProvider.ToolName;
     public string DisplayName => "SSH";
@@ -32,7 +33,10 @@ public sealed class SshDataSource(ISshServersRepository servers, ISshRunner ssh,
             .Select(t => new DataConnection(t.Id, t.Name))];
     }
 
-    public GuardResult Check(string request) => guards.Current.Check(request);
+    public GuardResult Check(string request)
+    {
+        return guards.Current.Check(request);
+    }
 
     public async Task<DataSourceResult> RunAsync(Guid connectionId, string request, TimeSpan timeout, CancellationToken ct)
     {
@@ -43,8 +47,9 @@ public sealed class SshDataSource(ISshServersRepository servers, ISshRunner ssh,
 
         // The server's own status is about reaching it (connecting and authenticating), not about whether this particular
         // command succeeded or finished in time: a timeout after connecting still means the server is up.
-        await servers.RecordConnectionAsync(connectionId, result.Connected, result.Connected ? null : result.Error ?? "Could not connect.",
-            result.Connected ? result.HostKeyFingerprint : null, ct);
+        server.RecordConnection(result.Connected, result.Connected ? null : result.Error ?? "Could not connect.",
+            result.Connected ? result.HostKeyFingerprint : null);
+        await db.SaveChangesAsync(ct);
         return new DataSourceResult(result.Connected, result.ExitCode, result.Stdout, result.Stderr, result.Error);
     }
 }

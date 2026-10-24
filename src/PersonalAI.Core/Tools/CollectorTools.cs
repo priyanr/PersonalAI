@@ -83,13 +83,20 @@ internal static class CollectorToolText
         }
     }
 
-    public static string Sample(IEnumerable<JsonObject> rows, int max = 3) =>
-        string.Join("\n", rows.Take(max).Select(r => "  " + r.ToJsonString()));
+    public static string Sample(IEnumerable<JsonObject> rows, int max = 3)
+    {
+        return string.Join("\n", rows.Take(max).Select(r => "  " + r.ToJsonString()));
+    }
 
-    public static string Describe(CollectionJob j) =>
-        $"{j.Name} [{j.Status}, {j.Source}{(j.OutsideAllowlist ? ", outside the allowed list" : "")}]: every {j.IntervalMinutes} min: {Short(j.Request)}";
+    public static string Describe(CollectionJob j)
+    {
+        return $"{j.Name} [{j.Status}, {j.Source}{(j.OutsideAllowlist ? ", outside the allowed list" : "")}]: every {j.IntervalMinutes} min: {Short(j.Request)}";
+    }
 
-    private static string Short(string s) => s.Length <= 160 ? s.ReplaceLineEndings(" ") : s[..157].ReplaceLineEndings(" ") + "...";
+    private static string Short(string s)
+    {
+        return s.Length <= 160 ? s.ReplaceLineEndings(" ") : s[..157].ReplaceLineEndings(" ") + "...";
+    }
 }
 
 public sealed class SshTool(CollectionRunner runner) : ITool
@@ -241,7 +248,7 @@ public sealed class CollectorListTool(IServiceScopeFactory scopes) : ITool
         if (context.AgentId is not { } agentId) return MonitoringToolSupport.NotAvailable();
 
         await using var scope = scopes.CreateAsyncScope();
-        var jobs = await scope.ServiceProvider.GetRequiredService<Interfaces.ICollectionJobsRepository>().GetAllAsync(agentId, ct);
+        var jobs = await scope.ServiceProvider.GetRequiredService<Services.Monitoring.Collectors.ICollectionJobsRepository>().GetAllAsync(agentId, ct);
         if (jobs.Count == 0) return new ToolCompleted("No jobs yet. Create jobs with collector_save.");
 
         var sb = new StringBuilder();

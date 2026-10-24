@@ -11,11 +11,16 @@ public sealed class DataSourceRegistry(IEnumerable<IDataSource> sources)
 
     public IReadOnlyCollection<IDataSource> All => _byTool.Values;
 
-    public IDataSource? Find(string? tool) => tool is not null && _byTool.TryGetValue(tool, out var s) ? s : null;
+    public IDataSource? Find(string? tool)
+    {
+        return tool is not null && _byTool.TryGetValue(tool, out var s) ? s : null;
+    }
 
     /// <summary>Data sources this agent is scoped to: the registered ones with at least one scope item selected.</summary>
-    public IReadOnlyList<IDataSource> ForAgent(DashboardAlertsConfig config) =>
-        [.. _byTool.Values.Where(s => config.ScopeFor(s.ToolName).Count > 0).OrderBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)];
+    public IReadOnlyList<IDataSource> ForAgent(DashboardAlertsConfig config)
+    {
+        return [.. _byTool.Values.Where(s => config.ScopeFor(s.ToolName).Count > 0).OrderBy(s => s.ToolName, StringComparer.OrdinalIgnoreCase)];
+    }
 
     /// <summary>The connections of one tool the agent may reach. Empty when the tool isn't in its scope.</summary>
     public async Task<IReadOnlyList<DataConnection>> ConnectionsAsync(IDataSource source, DashboardAlertsConfig config, CancellationToken ct)

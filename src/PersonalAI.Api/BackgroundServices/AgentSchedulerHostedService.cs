@@ -1,7 +1,7 @@
-using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities.Enums;
 using PersonalAI.Core.Models.Settings;
 using Microsoft.Extensions.Options;
+using PersonalAI.Core.Services.Agents;
 
 namespace PersonalAI.Api.BackgroundServices;
 
@@ -57,7 +57,7 @@ public sealed class AgentSchedulerHostedService(
             try
             {
                 await using var scope = scopeFactory.CreateAsyncScope();
-                var execution = scope.ServiceProvider.GetRequiredService<IAgentExecutionService>();
+                var execution = scope.ServiceProvider.GetRequiredService<AgentExecutionService>();
                 await foreach (var _ in execution.RunAsync(agentId, AgentRunTrigger.Scheduled, ct)) { }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

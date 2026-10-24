@@ -6,18 +6,13 @@ using PersonalAI.Core.Services.Sandbox;
 using PersonalAI.Core.Services.Tools;
 using PersonalAI.Sandbox.Protocol;
 using Microsoft.Extensions.Options;
+using PersonalAI.Core.Services.Sessions;
 
 namespace PersonalAI.Api.BackgroundServices;
 
-/// <summary>Polls for sandboxes that should be torn down and destroys them via ISandboxHostClient — the
-/// safety net for the ephemeral teardown SkillExecutionService/AgentExecutionService already do in their
-/// own finally blocks (this catches hard process kills, where finally never runs) and the only mechanism
-/// that ever retires an idle chat-session container. Same shape as AgentSchedulerHostedService: one scope
-/// per tick to select candidates, one scope per item so a single failure doesn't stop the batch or kill
-/// the loop.
-///
-/// Also the trigger for the sandbox tool's HostStopUrl: once a tick's reap work leaves zero active (not
-/// yet Destroyed) sandboxes, this is the signal that nothing needs the Docker host's machine anymore.</summary>
+/// <summary>Removes sandboxes nobody needs: idle chat containers (their files are kept) and skill or agent-run sandboxes
+/// a crash left behind. One scope per sandbox, so one failure doesn't stop the rest. When no sandbox is left active it
+/// calls the sandbox tool's HostStopUrl, since nothing needs the Docker host's machine anymore.</summary>
 public sealed class SandboxReaperHostedService(
     IServiceScopeFactory scopeFactory,
     IOptions<SandboxSettings> settings,
@@ -72,10 +67,7 @@ public sealed class SandboxReaperHostedService(
 
                 await hostClient.DestroySandboxAsync(instance.Id, deleteFiles, ct);
 
-                var repo = scope.ServiceProvider.GetRequiredService<ISandboxRepository>();
-                instance.Status = SandboxInstanceStatus.Destroyed;
-                instance.DestroyedAt = DateTimeOffset.UtcNow;
-                await repo.UpdateAsync(instance, ct);
+                await scope.ServiceProvider.GetRequiredService<SandboxProvisioningService>().MarkDestroyedAsync(instance, ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -135,10 +127,12 @@ public sealed class SandboxReaperHostedService(
 
     /// <summary>The sandbox tool's "IdleTimeoutMinutes" setting (live, no restart) wins over
     /// Sandbox:IdleTimeoutMinutes; a blank or unparseable value falls back to the config.</summary>
-    private int EffectiveIdleTimeoutMinutes() =>
-        int.TryParse(configCache.GetValue("sandbox", "IdleTimeoutMinutes"), out var minutes) && minutes > 0
+    private int EffectiveIdleTimeoutMinutes()
+    {
+        return int.TryParse(configCache.GetValue("sandbox", "IdleTimeoutMinutes"), out var minutes) && minutes > 0
             ? minutes
             : settings.Value.IdleTimeoutMinutes;
+    }
 }
 
 /// <summary>Pure candidate-selection logic, split out from SandboxReaperHostedService so it's unit

@@ -20,7 +20,10 @@ public interface ITool
     /// <summary>Whether this tool is "connected" beyond just having its required fields filled in (e.g.
     /// an OAuth token was actually obtained). Tools with no such concept default to false-less relevance
     /// since /api/tools only surfaces IsConnected for tools that opted into SettingsFields.</summary>
-    bool IsConnected(ToolConfigCache cache) => false;
+    bool IsConnected(ToolConfigCache cache)
+    {
+        return false;
+    }
 
     /// <summary>True for tools that only make sense inside an agent run (they need the calling agent's servers,
     /// datasets or dashboard). They are left out of chat and the skill tool picker, so their schemas don't cost
@@ -32,15 +35,19 @@ public interface ITool
 
 internal static class JsonArgumentExtensions
 {
-    public static string? GetStringArg(this JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+    public static string? GetStringArg(this JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
             ? v.GetString()
             : null;
+    }
 
-    public static int? GetIntArg(this JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)
+    public static int? GetIntArg(this JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)
             ? i
             : null;
+    }
 
     public static IReadOnlyList<string>? GetStringArrayArg(this JsonElement e, string name)
     {

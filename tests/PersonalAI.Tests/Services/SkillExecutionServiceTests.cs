@@ -2,6 +2,7 @@ using FluentAssertions;
 using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.DTOs;
+using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Settings;
 using PersonalAI.Core.Services.Agent;
 using PersonalAI.Core.Services.AI;
@@ -22,12 +23,12 @@ public class SkillExecutionServiceTests
         new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 
     private static SkillExecutionService CreateService(
-        AppDbContext db, FakeAIProvider provider, ToolRegistry tools, SecretsCache? secrets = null,
+        AppDbContext db, FakeAIProvider provider, ToolRegistry tools,
         AgentSettings? agentSettings = null, ISandboxHostClient? sandboxHostClient = null) => new(
         new SkillsRepository(db),
         new AIProviderRegistry([(IAIProvider)provider]),
         tools,
-        secrets ?? new SecretsCache(),
+        new SecretsRepository(db),
         Options.Create(agentSettings ?? new AgentSettings { MaxIterations = 25 }),
         sandboxHostClient ?? Mock.Of<ISandboxHostClient>(),
         Mock.Of<ILogger<SkillExecutionService>>());
@@ -36,8 +37,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_PlainTextReply_EndsWithDone()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "You are helpful.", "ollama", "llama3.1:8b", null, [], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "You are helpful.", "ollama", "llama3.1:8b", null, [], [], CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("Hi there", null, true)]);
         var service = CreateService(db, provider, new ToolRegistry([]));
@@ -54,8 +54,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_ToolCallWithinAllowlist_ExecutesAndLoopsToFinalAnswer()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "allowed_tool", "{}")], true)],
@@ -76,9 +75,8 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_ToolNotInAllowlist_RejectsWithoutExecutingIt()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
         // Skill only allows "allowed_tool" — the model tries a different, registered tool.
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "other_tool", "{}")], true)],
@@ -103,8 +101,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_ToolRequiresApproval_RejectsInsteadOfPausing()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["gated_tool"], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["gated_tool"], [], CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gated_tool", "{}")], true)],
@@ -127,12 +124,11 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_SecretPlaceholder_SubstitutedIntoToolArgumentsButNeverSentToProvider()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "s", null, "prompt", "ollama", "llama3.1:8b", null, ["http_tool"], ["API_KEY"], CancellationToken.None);
 
-        var secretsCache = new SecretsCache();
-        secretsCache.Set("API_KEY", "super-secret-value");
+        db.Secrets.Add(new Secret { Key = "API_KEY", Value = "super-secret-value" });
+        await db.SaveChangesAsync();
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "http_tool", """{"header":"Bearer {{secret.API_KEY}}"}""")], true)],
@@ -146,7 +142,7 @@ public class SkillExecutionServiceTests
                 return new ToolCompleted("ok");
             })
         ]);
-        var service = CreateService(db, provider, tools, secretsCache);
+        var service = CreateService(db, provider, tools);
 
         await foreach (var _ in service.RunAsync(skill.Id, null, CancellationToken.None)) { }
 
@@ -159,12 +155,11 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_SecretNotDeclaredBySkill_PlaceholderLeftUnresolved()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        // Skill does not declare "API_KEY" in its SecretKeys, even though it exists in the cache.
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["http_tool"], [], CancellationToken.None);
+        // Skill does not declare "API_KEY" in its SecretKeys, even though it is stored.
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["http_tool"], [], CancellationToken.None);
 
-        var secretsCache = new SecretsCache();
-        secretsCache.Set("API_KEY", "super-secret-value");
+        db.Secrets.Add(new Secret { Key = "API_KEY", Value = "super-secret-value" });
+        await db.SaveChangesAsync();
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "http_tool", """{"header":"Bearer {{secret.API_KEY}}"}""")], true)],
@@ -178,7 +173,7 @@ public class SkillExecutionServiceTests
                 return new ToolCompleted("ok");
             })
         ]);
-        var service = CreateService(db, provider, tools, secretsCache);
+        var service = CreateService(db, provider, tools);
 
         await foreach (var _ in service.RunAsync(skill.Id, null, CancellationToken.None)) { }
 
@@ -204,8 +199,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_ExceedsMaxIterations_EmitsErrorEvent()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["loop_tool"], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["loop_tool"], [], CancellationToken.None);
 
         var responses = Enumerable.Range(0, 3)
             .Select(_ => (IReadOnlyList<AiChatChunk>)[new AiChatChunk("", [new AiToolCall("call1", "loop_tool", "{}")], true)])
@@ -225,8 +219,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_EmptyReplyAtOutputLimit_EndsWithErrorInsteadOfDone()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, [], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, [], [], CancellationToken.None);
 
         var provider = new FakeAIProvider([
             new AiChatChunk(null, null, false, ReasoningDelta: "thinking"),
@@ -247,8 +240,7 @@ public class SkillExecutionServiceTests
     public async Task RunAsync_TruncatedToolCall_IsNotExecuted()
     {
         await using var db = NewContext();
-        var repo = new SkillsRepository(db);
-        var skill = await repo.CreateAsync("s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "s", null, "prompt", "ollama", "llama3.1:8b", null, ["allowed_tool"], [], CancellationToken.None);
 
         var ran = false;
         var provider = new FakeAIProvider(
