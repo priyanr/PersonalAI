@@ -13,17 +13,8 @@ public record SkillDto(
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
 
-public record CreateSkillRequest(
-    string Name,
-    string? Description,
-    string Prompt,
-    string? ProviderKey,
-    string ModelName,
-    int? NumCtx,
-    IReadOnlyList<string>? EnabledTools,
-    IReadOnlyList<string>? SecretKeys);
-
-public record UpdateSkillRequest(
+/// <summary>The body of both creating and editing a skill.</summary>
+public record SaveSkillRequest(
     string Name,
     string? Description,
     string Prompt,

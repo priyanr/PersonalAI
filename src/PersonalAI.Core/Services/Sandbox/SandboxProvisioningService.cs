@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PersonalAI.Core.Infrastructure;
 using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Models.Entities.Enums;
@@ -13,6 +14,7 @@ namespace PersonalAI.Core.Services.Sandbox;
 /// Both entry points reuse a Running sandbox as-is and transparently recreate an Orphaned/idle-reaped one,
 /// preserving its previous ports, since the host directory survives independently of the container.</summary>
 public sealed class SandboxProvisioningService(
+    AppDbContext db,
     ISandboxHostClient hostClient,
     ISandboxRepository repository)
 {
@@ -38,14 +40,16 @@ public sealed class SandboxProvisioningService(
             var previous = await repository.GetMostRecentByOwnerAsync(owner.Id, ct);
             priorPortsJson = previous?.PortsJson;
 
-            instance = await repository.AddAsync(new SandboxInstance
+            instance = new SandboxInstance
             {
                 Kind = kind,
                 OwnerId = owner.Id,
                 Image = image,
                 Status = SandboxInstanceStatus.Creating,
                 PortsJson = priorPortsJson ?? "[]"
-            }, ct);
+            };
+            db.SandboxInstances.Add(instance);
+            await db.SaveChangesAsync(ct);
         }
 
         var wasRecreated = false;
@@ -58,19 +62,12 @@ public sealed class SandboxProvisioningService(
         }
 
         instance.LastUsedAt = DateTimeOffset.UtcNow;
-        await repository.UpdateAsync(instance, ct);
+        await db.SaveChangesAsync(ct);
         return (instance.Id, ParsePorts(instance.PortsJson), wasRecreated, null);
     }
 
-    /// <summary>Called mid-tool-call when the broker itself reports (ExecCompleted.ContainerMissing /
-    /// FileOpResponse.ContainerMissing) that a sandbox's container is gone even though the DB row still
-    /// says Running -- the gap EnsureAsync's own `Status != Running` check can't catch, since nothing
-    /// re-verifies a Running row between broker (re)connects (see SandboxReconciler, which only runs on
-    /// connect). Flips the row to Orphaned first -- RecreateContainerAsync only ever sets Status back to
-    /// Running on success and just records LastError on failure, so without this the row would stay
-    /// falsely Running forever if the recreate attempt itself also fails -- then reuses
-    /// RecreateContainerAsync exactly as EnsureAsync/TryEnsureExistingAsync do, preserving the row's
-    /// existing ports.</summary>
+    /// <summary>The host says the container of a sandbox we think is Running is gone. Marks it Orphaned first (so a failed
+    /// recreate doesn't leave it falsely Running), then recreates it with its existing ports.</summary>
     public async Task<(bool Recreated, IReadOnlyList<int> Ports, string? Error)> RecreateAfterContainerMissingAsync(
         SandboxOwner owner, CancellationToken ct)
     {
@@ -79,26 +76,20 @@ public sealed class SandboxProvisioningService(
             return (false, [], "The sandbox no longer has an active row for this owner.");
 
         instance.Status = SandboxInstanceStatus.Orphaned;
-        await repository.UpdateAsync(instance, ct);
+        await db.SaveChangesAsync(ct);
 
         var error = await RecreateContainerAsync(instance, MapKind(owner.Kind), owner.Id, ct);
         if (error is not null)
             return (false, [], error);
 
         instance.LastUsedAt = DateTimeOffset.UtcNow;
-        await repository.UpdateAsync(instance, ct);
+        await db.SaveChangesAsync(ct);
         return (true, ParsePorts(instance.PortsJson), null);
     }
 
-    /// <summary>Browsing-only variant: never creates a sandbox that never existed for this owner — a file
-    /// browser opened for an owner with no sandbox history has nothing to show, and shouldn't spin one up
-    /// just because someone looked. Looks at the most recent row regardless of status (including
-    /// Destroyed) since a chat session's Destroyed row still has its files on disk (the idle reaper keeps
-    /// them) and is recreated the same way an Orphaned one is. The one case treated as permanently gone:
-    /// an Ephemeral (skill/agent-run) sandbox that reached Destroyed — both SkillExecutionService and
-    /// AgentExecutionService call DestroySandboxAsync(..., deleteFiles: true, ...) unconditionally when a
-    /// run ends, and the reaper's ephemeral safety net does the same, so there is nothing left to
-    /// browse.</summary>
+    /// <summary>For the file browser: recreates an owner's existing sandbox, but never creates a first one just because
+    /// someone looked. A chat's Destroyed sandbox still has its files and is recreated; a skill or agent run's Destroyed
+    /// sandbox had its files deleted, so there is nothing to show.</summary>
     public async Task<(bool Found, Guid SandboxId, IReadOnlyList<int> Ports, SandboxInstanceStatus? Status, string? Error)> TryEnsureExistingAsync(
         Guid ownerId, CancellationToken ct)
     {
@@ -114,7 +105,7 @@ public sealed class SandboxProvisioningService(
         }
 
         instance.LastUsedAt = DateTimeOffset.UtcNow;
-        await repository.UpdateAsync(instance, ct);
+        await db.SaveChangesAsync(ct);
         return (true, instance.Id, ParsePorts(instance.PortsJson), instance.Status, null);
     }
 
@@ -142,7 +133,7 @@ public sealed class SandboxProvisioningService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             instance.LastError = ex.Message;
-            await repository.UpdateAsync(instance, ct);
+            await db.SaveChangesAsync(ct);
             return ex.Message;
         }
     }
@@ -168,8 +159,20 @@ public sealed class SandboxProvisioningService(
     /// is nothing left on disk to browse or recreate. A Session (chat) sandbox's Destroyed row, by
     /// contrast, only means the idle reaper retired the container — its files are kept, so it's still
     /// browsable (recreating the container on demand).</summary>
-    private static bool IsPermanentlyGone(SandboxInstance instance) =>
-        instance.Kind == SandboxKind.Ephemeral && instance.Status == SandboxInstanceStatus.Destroyed;
+    private static bool IsPermanentlyGone(SandboxInstance instance)
+    {
+        return instance.Kind == SandboxKind.Ephemeral && instance.Status == SandboxInstanceStatus.Destroyed;
+    }
+
+    /// <summary>Records that the reaper destroyed this sandbox's container. <paramref name="instance"/> was loaded in the
+    /// reaper's own scope, so it is attached here.</summary>
+    public async Task MarkDestroyedAsync(SandboxInstance instance, CancellationToken ct)
+    {
+        instance.Status = SandboxInstanceStatus.Destroyed;
+        instance.DestroyedAt = DateTimeOffset.UtcNow;
+        db.SandboxInstances.Update(instance);
+        await db.SaveChangesAsync(ct);
+    }
 
     private static IReadOnlyList<int> ParsePorts(string portsJson)
     {
@@ -183,9 +186,12 @@ public sealed class SandboxProvisioningService(
         }
     }
 
-    private static SandboxKind MapKind(SandboxOwnerKind kind) => kind switch
+    private static SandboxKind MapKind(SandboxOwnerKind kind)
     {
-        SandboxOwnerKind.ChatSession => SandboxKind.Session,
-        _ => SandboxKind.Ephemeral
-    };
+        return kind switch
+        {
+            SandboxOwnerKind.ChatSession => SandboxKind.Session,
+            _ => SandboxKind.Ephemeral
+        };
+    }
 }

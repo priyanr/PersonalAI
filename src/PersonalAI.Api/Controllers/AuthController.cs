@@ -27,7 +27,10 @@ public class AuthController(OAuthClient oauthClient, IOptions<AuthSettings> auth
 
     [AllowAnonymous]
     [HttpGet("status")]
-    public ActionResult<AuthStatusDto> Status() => Ok(new AuthStatusDto(Settings.Enabled));
+    public ActionResult<AuthStatusDto> Status()
+    {
+        return Ok(new AuthStatusDto(Settings.Enabled));
+    }
 
     /// <param name="code_challenge">Optional PKCE S256 challenge (RFC 7636) computed by the frontend.</param>
     [AllowAnonymous]
@@ -124,8 +127,10 @@ public class AuthController(OAuthClient oauthClient, IOptions<AuthSettings> auth
 
     /// <summary>Scopes live in <c>scope</c> (RFC 9068, space-separated) or <c>scp</c> (Entra: space-separated
     /// string; Okta: a JSON array, which arrives as one claim per entry).</summary>
-    private static string ScopeOf(IEnumerable<Claim> claims) =>
-        string.Join(' ', claims.Where(c => c.Type is "scope" or "scp").Select(c => c.Value));
+    private static string ScopeOf(IEnumerable<Claim> claims)
+    {
+        return string.Join(' ', claims.Where(c => c.Type is "scope" or "scp").Select(c => c.Value));
+    }
 
     private static TokenResponseDto ToDto(OAuthTokenResponse tokens)
     {

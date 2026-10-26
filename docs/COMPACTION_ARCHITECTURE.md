@@ -101,7 +101,7 @@ permanently stalling compaction for that session while `pending` grows without b
 
 `BuildWireMessages` (`src/PersonalAI.Core/Services/Agent/ChatAgentService.cs`) builds the payload sent
 to the provider each iteration of `LoopAsync`. Compaction needs an async provider call and a DB write,
-so `LoopAsync` calls `EnsureHistoryCompactedAsync(session, history, ct)` right after loading `history`
+so `LoopAsync` calls `ChatHistoryCompaction.CompactIfDueAsync(session, history, ct)` right after loading `history`
 and before `BuildWireMessages`, gated by `session.TrimHistoryEnabled` (the same toggle that used to
 gate `DropOldHistory` — its semantics changed from "drop" to "compact", but the name, DB column, and
 `/api/sessions/{id}/settings` field stayed the same to avoid churn). On success it mutates
@@ -123,7 +123,7 @@ one fold per *turn* rather than one fold per iteration.
 Same session provider/model as the turn itself (`AIProviderRegistry.Resolve(session.ProviderKey)`,
 `session.ModelName`) — no separate provider/model selection for the summarizer. A plain
 `ChatStreamAsync` call with `tools: []` and `think: false`, fully consumed into a string inside
-`EnsureHistoryCompactedAsync` — never yielded as a `TextDeltaEvent`, so it's invisible to the user's
+`ChatHistoryCompaction.CompactIfDueAsync` — never yielded as a `TextDeltaEvent`, so it's invisible to the user's
 stream. Message shape:
 
 - `system` — instructs the model to produce one updated, terse, bulleted summary preserving the
@@ -142,7 +142,7 @@ stream. Message shape:
 ## Failure handling
 
 The provider call is wrapped in try/catch (`OperationCanceledException` rethrows; anything else is
-treated as failure). On failure, `EnsureHistoryCompactedAsync` persists nothing — `HistorySummary`/
+treated as failure). On failure, `ChatHistoryCompaction.CompactIfDueAsync` persists nothing — `HistorySummary`/
 `SummarizedThroughSequenceNumber` are left exactly as loaded — and returns `false`. `LoopAsync` reads
 that as `compactionFailed` and passes `forceLegacyDrop: true` into `BuildWireMessages` for that turn
 only, which falls back to the pre-compaction `DropOldHistory` behavior (fixed kept-window +

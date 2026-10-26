@@ -11,15 +11,9 @@ using Microsoft.Extensions.Options;
 
 namespace PersonalAI.Core.Tools;
 
-/// <summary>Gives the model a full Docker container to run commands and manage files in — the same nine
-/// operations the in-process file tools already offer (read/write/edit/list/search, plus delete/move/mkdir)
-/// and one more (exec) that none of them can do at all. Everything is delegated to the sandbox host broker
-/// over ISandboxHostClient; this tool never touches Docker or the filesystem directly.
-///
-/// Like GmailTool, this lives inside the singleton ToolRegistry but needs the Scoped
-/// SandboxProvisioningService (it wraps the Scoped ISandboxRepository/AppDbContext) — captured via
-/// IServiceScopeFactory rather than as a constructor dependency, the same captive-dependency workaround, so
-/// a fresh scope is opened only for the get-or-create lookup/update.</summary>
+/// <summary>Gives the model a Docker container to run commands and manage files in: one per chat session, or one per
+/// skill or agent run. Everything goes through the sandbox host broker (ISandboxHostClient); this tool never touches
+/// Docker or the file system itself. SandboxProvisioningService is scoped, so it is resolved per call from a scope.</summary>
 public sealed class SandboxTool(
     ISandboxHostClient hostClient,
     IOptions<SandboxSettings> settings,
@@ -87,19 +81,13 @@ public sealed class SandboxTool(
     public IReadOnlyList<ToolSettingField> SettingsFields =>
     [
         new("DefaultImage", "Default sandbox image", ToolSettingFieldType.Text, Required: false),
-        // Sandbox:AllowedImages (Sandbox:AllowedImages / Sandbox__AllowedImages__N) is operator config that
-        // needs an app restart to change. This is the live-editable complement to it: a comma-separated
-        // list stored in ToolConfig, picked up immediately (no restart) since ToolConfigCache is updated
-        // synchronously by the PATCH /api/tools/sandbox request that sets it.
+        // Added to Sandbox:AllowedImages without a restart.
         new("AdditionalAllowedImages", "Additional allowed images (comma-separated)", ToolSettingFieldType.Text, Required: false),
-        // Both optional and both plain webhook triggers -- whatever wakes/sleeps the machine that runs
-        // the Docker host (a Wake-on-LAN relay, a smart plug's API, a Home Assistant/n8n webhook, ...).
-        // Called by SandboxHostPowerSignaler: Start when the tool finds no broker connected, Stop by the
-        // reaper once it observes zero active sandboxes remaining (never by the tool itself).
+        // Webhooks that wake and sleep the Docker host's machine (Wake-on-LAN relay, smart plug, Home Assistant...). Start is
+        // called when no host is connected, Stop by the reaper once no sandbox is active.
         new("HostStartUrl", "Host start URL", ToolSettingFieldType.Url, Required: false),
         new("HostStopUrl", "Host stop URL", ToolSettingFieldType.Url, Required: false),
-        // Live override of Sandbox:IdleTimeoutMinutes, read by SandboxReaperHostedService on every tick —
-        // blank falls back to the config value. Retires the chat container only; its files are kept.
+        // Overrides Sandbox:IdleTimeoutMinutes without a restart.
         new("IdleTimeoutMinutes", "Idle shutdown (minutes)", ToolSettingFieldType.Number, Required: false,
             Placeholder: $"Default: {settings.Value.IdleTimeoutMinutes}",
             Help: $"Stops a chat's sandbox container after this many minutes without activity; its files are kept. " +
@@ -107,7 +95,10 @@ public sealed class SandboxTool(
         new("HostStatus", "Sandbox host", ToolSettingFieldType.Custom, Required: false, CustomComponentKey: "sandboxHostStatus")
     ];
 
-    public bool IsConnected(ToolConfigCache cache) => hostClient.IsConnected;
+    public bool IsConnected(ToolConfigCache cache)
+    {
+        return hostClient.IsConnected;
+    }
 
     public async Task<ToolExecutionResult> ExecuteAsync(JsonElement arguments, ToolExecutionContext context, CancellationToken ct)
     {
@@ -119,49 +110,8 @@ public sealed class SandboxTool(
             return new ToolCompleted(
                 "The sandbox tool is not available in this context — no owning session or run was provided.", IsError: true);
 
-        // Short-circuit rather than let EnsureSandboxAsync/ExecAsync time out against a dead connection.
-        // If a HostStartUrl is configured, this is also the trigger to wake whatever machine runs the
-        // Docker host — the broker obviously can't dial in while that machine itself is off.
-        if (!hostClient.IsConnected)
-        {
-            var startResult = await powerSignaler.TryFireStartAsync(force: false, ct);
-
-            // No HostStartUrl configured — nothing to wait for, fail immediately as before.
-            if (startResult is null)
-                return new ToolCompleted(
-                    "The sandbox host is not connected. No broker is currently reachable — try again later.",
-                    IsError: true);
-
-            var pollInterval = TimeSpan.FromSeconds(Math.Max(1, settings.Value.HostStartPollIntervalSeconds));
-            var maxWait = TimeSpan.FromSeconds(Math.Max(0, settings.Value.HostStartMaxWaitSeconds));
-            var retryInterval = TimeSpan.FromSeconds(Math.Max(1, settings.Value.HostStartRetryIntervalSeconds));
-
-            if (maxWait > TimeSpan.Zero)
-            {
-                context.OnProgress?.Invoke("Waiting for sandbox host to boot...");
-                var deadline = timeProvider.GetUtcNow() + maxWait;
-                var nextRetry = timeProvider.GetUtcNow() + retryInterval;
-
-                while (!hostClient.IsConnected && timeProvider.GetUtcNow() < deadline)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    if (timeProvider.GetUtcNow() >= nextRetry)
-                    {
-                        await powerSignaler.TryFireStartAsync(force: true, ct);
-                        nextRetry = timeProvider.GetUtcNow() + retryInterval;
-                    }
-
-                    await Task.Delay(pollInterval, timeProvider, ct);
-                }
-            }
-
-            if (!hostClient.IsConnected)
-                return new ToolCompleted(
-                    $"A start signal was sent but the sandbox host did not connect within {(int)maxWait.TotalSeconds}s. " +
-                    "The host may still be booting — try again shortly.",
-                    IsError: true);
-        }
+        if (!hostClient.IsConnected && await WakeHostAsync(context, ct) is { } hostError)
+            return new ToolCompleted(hostError, IsError: true);
 
         var (image, imageError) = ResolveImage();
         if (imageError is not null)
@@ -173,42 +123,28 @@ public sealed class SandboxTool(
         if (sandboxError is not null)
             return new ToolCompleted(sandboxError, IsError: true);
 
-        var outcome = new SelfHealOutcome();
+        var sandbox = new Sandbox(hostClient, provisioning, owner, sandboxId);
+        ToolExecutionResult result;
         try
         {
-            var actionResult = action switch
+            result = action switch
             {
-                "exec" => await ExecAsync(owner, sandboxId, provisioning, outcome, arguments, context, ct),
-                "read_file" => await ReadFileAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "write_file" => await WriteFileAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "edit_file" => await EditFileAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "list_files" => await ListFilesAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "search_files" => await SearchFilesAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "delete" => await DeleteAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "move" => await MoveAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "mkdir" => await MkdirAsync(owner, sandboxId, provisioning, outcome, arguments, ct),
-                "ports" => RenderPorts(ports),
-                _ => new ToolCompleted($"Unsupported action '{action}'.", IsError: true)
+                "exec" => await ExecAsync(sandbox, arguments, context, ct),
+                "read_file" => await ReadFileAsync(sandbox, arguments, ct),
+                "write_file" => await WriteFileAsync(sandbox, arguments, ct),
+                "edit_file" => await EditFileAsync(sandbox, arguments, ct),
+                "list_files" => await ListFilesAsync(sandbox, arguments, ct),
+                "search_files" => await SearchFilesAsync(sandbox, arguments, ct),
+                "delete" => await DeleteAsync(sandbox, arguments, ct),
+                "move" => await MoveAsync(sandbox, arguments, ct),
+                "mkdir" => await MkdirAsync(sandbox, arguments, ct),
+                _ => RenderPorts(ports)
             };
-
-            // Only a plain ToolCompleted gets the notice prepended — never ToolApprovalRequired (exec's
-            // dangerous-command pause has a fixed prompt string the approval flow matches on). No IsError
-            // check: the freshness/port info is still useful context even when this particular action
-            // failed. outcome.Recreated covers a mid-call self-heal (the container was gone even though
-            // EnsureSandboxAsync above thought it was Running); wasRecreated covers the top-level
-            // EnsureAsync recreation. Either can fire independently — only one notice is ever prepended.
-            var wasRecreatedOverall = wasRecreated || outcome.Recreated;
-            var noticePorts = outcome.Recreated ? outcome.Ports : ports;
-            if (wasRecreatedOverall && actionResult is ToolCompleted completed)
-                return completed with { Content = BuildRecreationNotice(noticePorts) + completed.Content };
-
-            return actionResult;
         }
         catch (OperationCanceledException) { throw; }
         catch (SandboxHostDisconnectedException ex)
         {
-            // The command's actual effect is unknown — it may have completed on the container even
-            // though the broker connection died before the response made it back.
+            // The command may still have completed in the container even though the answer never came back.
             return new ToolCompleted(
                 $"Sandbox host disconnected mid-command; its actual exit status is unknown. {ex.Message}", IsError: true);
         }
@@ -216,18 +152,100 @@ public sealed class SandboxTool(
         {
             return new ToolCompleted($"Sandbox tool failed: {ex.Message}", IsError: true);
         }
+
+        // A recreated container is empty and has new ports: the model must hear that, even when this action failed.
+        // Never on an approval request, whose text the approval flow shows as is.
+        if ((wasRecreated || sandbox.RecreatedPorts is not null) && result is ToolCompleted completed)
+            return completed with { Content = RecreationNotice(sandbox.RecreatedPorts ?? ports) + completed.Content };
+        return result;
     }
 
-    /// <summary>Not static — needs hostClient.RemoteIp, the connected broker's own source address as the
-    /// API's TCP stack (or a trusted proxy's X-Forwarded-For) sees it, which is where a published port is
-    /// actually reachable from. Falls back to the old generic guidance if it's ever unset (defensive only
-    /// — "ports" already requires IsConnected to reach here, so RemoteIp should always be populated by
-    /// the time a real broker has completed its handshake).</summary>
+    /// <summary>The Docker host is not connected. If a HostStartUrl is configured, sends the start signal and waits for the
+    /// host to connect, signalling again now and then. Returns an error for the model, or null once it is connected.</summary>
+    private async Task<string?> WakeHostAsync(ToolExecutionContext context, CancellationToken ct)
+    {
+        if (await powerSignaler.TryFireStartAsync(force: false, ct) is null)
+            return "The sandbox host is not connected. No broker is currently reachable — try again later.";
+
+        var pollInterval = TimeSpan.FromSeconds(Math.Max(1, settings.Value.HostStartPollIntervalSeconds));
+        var maxWait = TimeSpan.FromSeconds(Math.Max(0, settings.Value.HostStartMaxWaitSeconds));
+        var retryInterval = TimeSpan.FromSeconds(Math.Max(1, settings.Value.HostStartRetryIntervalSeconds));
+
+        if (maxWait > TimeSpan.Zero)
+        {
+            context.OnProgress?.Invoke("Waiting for sandbox host to boot...");
+            var deadline = timeProvider.GetUtcNow() + maxWait;
+            var nextRetry = timeProvider.GetUtcNow() + retryInterval;
+            while (!hostClient.IsConnected && timeProvider.GetUtcNow() < deadline)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (timeProvider.GetUtcNow() >= nextRetry)
+                {
+                    await powerSignaler.TryFireStartAsync(force: true, ct);
+                    nextRetry = timeProvider.GetUtcNow() + retryInterval;
+                }
+                await Task.Delay(pollInterval, timeProvider, ct);
+            }
+        }
+
+        return hostClient.IsConnected
+            ? null
+            : $"A start signal was sent but the sandbox host did not connect within {(int)maxWait.TotalSeconds}s. " +
+              "The host may still be booting — try again shortly.";
+    }
+
+    /// <summary>One call's sandbox. When the host reports the container gone (it never started the command), it is
+    /// recreated with its ports and the request is retried exactly once; RecreatedPorts then holds the new ports.</summary>
+    private sealed class Sandbox(ISandboxHostClient hostClient, SandboxProvisioningService provisioning, SandboxOwner owner, Guid id)
+    {
+        public Guid Id => id;
+        public IReadOnlyList<int>? RecreatedPorts { get; private set; }
+
+        public async Task<SandboxExecResult> ExecAsync(IReadOnlyList<string> command, string? workingDir, TimeSpan timeout, CancellationToken ct)
+        {
+            var result = await hostClient.ExecAsync(id, command, workingDir, timeout, ct);
+            if (!result.ContainerMissing) return result;
+
+            var recreateError = await RecreateAsync(ct);
+            if (recreateError is not null)
+                return result with { Error = $"{result.Error} (automatic recreation also failed: {recreateError})" };
+
+            var retry = await hostClient.ExecAsync(id, command, workingDir, timeout, ct);
+            return retry.ContainerMissing
+                ? retry with { Error = $"{retry.Error} (still reported missing after one automatic recreation; not retrying again)" }
+                : retry;
+        }
+
+        public async Task<FileOpResponse> FileOpAsync(FileOpRequest request, CancellationToken ct)
+        {
+            var response = await hostClient.FileOpAsync(request, ct);
+            if (!response.ContainerMissing) return response;
+
+            var recreateError = await RecreateAsync(ct);
+            if (recreateError is not null)
+                return response with { Error = $"{response.Error} (automatic recreation also failed: {recreateError})" };
+
+            // A new RequestId: requests in flight are matched to their answers by it.
+            var retry = await hostClient.FileOpAsync(request with { RequestId = Guid.NewGuid() }, ct);
+            return retry.ContainerMissing
+                ? retry with { Error = $"{retry.Error} (still reported missing after one automatic recreation; not retrying again)" }
+                : retry;
+        }
+
+        private async Task<string?> RecreateAsync(CancellationToken ct)
+        {
+            var (recreated, ports, error) = await provisioning.RecreateAfterContainerMissingAsync(owner, ct);
+            if (recreated) RecreatedPorts = ports;
+            return recreated ? null : error;
+        }
+    }
+
     private ToolExecutionResult RenderPorts(IReadOnlyList<int> ports)
     {
         if (ports.Count == 0)
             return new ToolCompleted("No ports are published for this sandbox.", IsError: false);
 
+        // The host's address as seen by the API is where a published port is reachable from.
         if (hostClient.RemoteIp is not { } remoteIp)
             return new ToolCompleted(
                 $"Ports published for this sandbox: {string.Join(", ", ports)}. " +
@@ -235,9 +253,7 @@ public sealed class SandboxTool(
                 "from outside — a port not in this list will run but won't be reachable.",
                 IsError: false);
 
-        // IPv6 needs bracketing in a URL ("http://[::1]:51234") -- an unbracketed IPv6 address's own
-        // colons would be indistinguishable from the port separator.
-        var host = remoteIp.Contains(':') ? $"[{remoteIp}]" : remoteIp;
+        var host = remoteIp.Contains(':') ? $"[{remoteIp}]" : remoteIp; // IPv6 is bracketed in a URL
         var urls = string.Join(", ", ports.Select(p => $"http://{host}:{p}"));
         return new ToolCompleted(
             $"Ports published for this sandbox: {string.Join(", ", ports)}. Bind a server to " +
@@ -246,72 +262,9 @@ public sealed class SandboxTool(
             IsError: false);
     }
 
-    /// <summary>Mutable out-parameter substitute for the 9 action handlers: threading a 3-tuple return
-    /// through every one of them just to carry "did a mid-call self-heal fire, and with what ports" would
-    /// touch every line that reads their result. Each handler mutates this instead when
-    /// Exec/FileOpWithSelfHealAsync recreates the container mid-call.</summary>
-    private sealed class SelfHealOutcome
-    {
-        public bool Recreated;
-        public IReadOnlyList<int> Ports = [];
-    }
-
-    /// <summary>Wraps hostClient.ExecAsync: if the broker reports the container itself is gone
-    /// (ContainerMissing — resolve failed, or Docker itself threw 404/409, so the command never actually
-    /// started), marks the DB row Orphaned, recreates the container preserving its ports, and retries the
-    /// exact same command once. Retries exactly once by construction — a still-ContainerMissing result
-    /// after the retry is returned as-is with Error augmented, never retried again.</summary>
-    private async Task<SandboxExecResult> ExecWithSelfHealAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        IReadOnlyList<string> command, string? workingDir, TimeSpan timeout, CancellationToken ct)
-    {
-        var result = await hostClient.ExecAsync(sandboxId, command, workingDir, timeout, ct);
-        if (!result.ContainerMissing)
-            return result;
-
-        var (recreated, newPorts, recreateError) = await provisioning.RecreateAfterContainerMissingAsync(owner, ct);
-        if (!recreated)
-            return result with { Error = $"{result.Error} (automatic recreation also failed: {recreateError})" };
-
-        var retry = await hostClient.ExecAsync(sandboxId, command, workingDir, timeout, ct);
-        if (retry.ContainerMissing)
-            return retry with { Error = $"{retry.Error} (still reported missing after one automatic recreation; not retrying again)" };
-
-        outcome.Recreated = true;
-        outcome.Ports = newPorts;
-        return retry;
-    }
-
-    /// <summary>File-op equivalent of ExecWithSelfHealAsync. The retry MUST use a fresh RequestId — the
-    /// pump correlates in-flight requests by it, so reusing the first attempt's id for a second call would
-    /// be wrong even though the first attempt (ContainerMissing means resolve failed before the file
-    /// service was ever reached) had no observable effect to worry about duplicating.</summary>
-    private async Task<FileOpResponse> FileOpWithSelfHealAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        FileOpRequest request, CancellationToken ct)
-    {
-        var response = await hostClient.FileOpAsync(request, ct);
-        if (!response.ContainerMissing)
-            return response;
-
-        var (recreated, newPorts, recreateError) = await provisioning.RecreateAfterContainerMissingAsync(owner, ct);
-        if (!recreated)
-            return response with { Error = $"{response.Error} (automatic recreation also failed: {recreateError})" };
-
-        var retry = await hostClient.FileOpAsync(request with { RequestId = Guid.NewGuid() }, ct);
-        if (retry.ContainerMissing)
-            return retry with { Error = $"{retry.Error} (still reported missing after one automatic recreation; not retrying again)" };
-
-        outcome.Recreated = true;
-        outcome.Ports = newPorts;
-        return retry;
-    }
-
-    /// <summary>Prepended to a ToolCompleted's Content whenever GetOrCreateSandboxAsync had to (re)create
-    /// a container for an owner that had used one before — the model otherwise has no way to tell "same
-    /// container as last turn" from "brand-new, empty container" and will confidently report continuity
-    /// that isn't real.</summary>
-    private static string BuildRecreationNotice(IReadOnlyList<int> ports)
+    /// <summary>Otherwise the model can't tell "same container as last turn" from "a new, empty one" and reports
+    /// continuity that isn't real.</summary>
+    private static string RecreationNotice(IReadOnlyList<int> ports)
     {
         var portsText = ports.Count == 0 ? "none" : string.Join(", ", ports);
         return "[Sandbox note] This sandbox's previous container was gone, so a fresh one was just " +
@@ -321,15 +274,19 @@ public sealed class SandboxTool(
                "conversation.\n\n";
     }
 
-    /// <summary>The image is operator configuration (the tool's own DefaultImage settings field, falling
-    /// back to Sandbox:DefaultImage), never a per-call model argument — the allow-list is the boundary, so
-    /// there is nothing for the model to bypass by asking for a different image.</summary>
+    /// <summary>The image is operator configuration (the tool's DefaultImage setting, else Sandbox:DefaultImage), never a
+    /// model argument, so the allowed list can't be bypassed by asking for another image.</summary>
     private (string? Image, string? Error) ResolveImage()
     {
         var image = configCache.GetValue("sandbox", "DefaultImage");
         if (string.IsNullOrWhiteSpace(image)) image = settings.Value.DefaultImage;
 
-        var allowed = EffectiveAllowedImages();
+        // Sandbox:AllowedImages (needs a restart) plus the live "Additional allowed images" setting. Empty means any image.
+        var allowed = new List<string>(settings.Value.AllowedImages);
+        var additional = configCache.GetValue("sandbox", "AdditionalAllowedImages") ?? "";
+        foreach (var entry in additional.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            if (!allowed.Contains(entry, StringComparer.Ordinal)) allowed.Add(entry);
+
         if (allowed.Count > 0 && !allowed.Contains(image!))
             return (null, $"Configured sandbox image '{image}' is not in the allowed list ({string.Join(", ", allowed)}). " +
                           "Fix Sandbox:AllowedImages, the sandbox tool's Additional allowed images setting, or its Default sandbox image setting.");
@@ -337,108 +294,59 @@ public sealed class SandboxTool(
         return (image, null);
     }
 
-    /// <summary>Union of the operator config array (Sandbox:AllowedImages — needs an app restart to
-    /// change) and the tool setting's comma-separated list (ToolConfig "AdditionalAllowedImages" — live,
-    /// no restart needed). Deduplicated so the same image listed in both doesn't show up twice in an error
-    /// message; empty entries from stray commas/whitespace are dropped. An empty result (nothing configured
-    /// in either place) means "any image allowed" — same as the original Sandbox:AllowedImages-only
-    /// behaviour, preserved here rather than only satisfied by one specific source.</summary>
-    private List<string> EffectiveAllowedImages()
-    {
-        var result = new List<string>(settings.Value.AllowedImages);
-
-        var additional = configCache.GetValue("sandbox", "AdditionalAllowedImages");
-        if (!string.IsNullOrWhiteSpace(additional))
-        {
-            foreach (var entry in additional.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (!result.Contains(entry, StringComparer.Ordinal))
-                    result.Add(entry);
-            }
-        }
-
-        return result;
-    }
-
-    private async Task<ToolExecutionResult> ExecAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, ToolExecutionContext context, CancellationToken ct)
+    private async Task<ToolExecutionResult> ExecAsync(Sandbox sandbox, JsonElement arguments, ToolExecutionContext context, CancellationToken ct)
     {
         var command = arguments.GetStringArrayArg("command");
         if (command is null || command.Count == 0)
             return new ToolCompleted("'command' (a non-empty array of argv strings) is required for exec.", IsError: true);
 
-        if (!context.PreApproved && settings.Value.RequireApprovalForDangerousCommands)
-        {
-            var joined = string.Join(' ', command);
-            var matchedPattern = FindDangerousPattern(joined);
-            if (matchedPattern is not null)
-            {
-                // Same mechanism the file tools use for a workspace escape: ChatAgentService pauses the
-                // session and shows an approve/deny prompt; SkillExecutionService/AgentExecutionService
-                // (no user to ask) reject this outright instead, so an unattended run never executes a
-                // flagged command no matter how this is answered here.
-                return new ToolApprovalRequired(
-                    "This command matches a pattern flagged as a package install or a broadly destructive " +
-                    "operation, so it needs your explicit approval before it runs in the sandbox.",
-                    joined);
-            }
-        }
+        // Same pause as a file tool's workspace escape: chat asks the user; skill and agent runs refuse it.
+        var joined = string.Join(' ', command);
+        if (!context.PreApproved && settings.Value.RequireApprovalForDangerousCommands && IsDangerous(joined))
+            return new ToolApprovalRequired(
+                "This command matches a pattern flagged as a package install or a broadly destructive " +
+                "operation, so it needs your explicit approval before it runs in the sandbox.",
+                joined);
 
-        var workingDir = arguments.GetStringArg("working_dir");
         var timeoutSeconds = Math.Clamp(
             arguments.GetIntArg("timeout_seconds") ?? settings.Value.DefaultExecTimeoutSeconds,
             1, Math.Max(1, settings.Value.MaxExecTimeoutSeconds));
+        var result = await sandbox.ExecAsync(command, arguments.GetStringArg("working_dir"), TimeSpan.FromSeconds(timeoutSeconds), ct);
 
-        var result = await ExecWithSelfHealAsync(
-            owner, sandboxId, provisioning, outcome, command, workingDir, TimeSpan.FromSeconds(timeoutSeconds), ct);
-
-        // A null exit code with no timeout means the command never actually ran — a hard broker/Docker
-        // failure (container missing and the self-heal retry above also failed, a transport error, ...) —
-        // not a legitimate empty-output success. Surfacing it as an error with the real message is the fix
-        // for what used to render as a silent "Exit code: unknown" with blank stdout/stderr.
+        // No exit code and no timeout: the command never ran (a broker or Docker failure), not an empty success.
         if (result.ExitCode is null && !result.TimedOut)
             return new ToolCompleted(
                 $"The sandbox command failed to run: {result.Error ?? "no diagnostic information was returned."}",
                 IsError: true);
 
-        // A non-zero exit is not a tool failure — the command ran and the model can see the exit code and
-        // react, the same posture HttpTool takes with a non-2xx HTTP status.
+        // A non-zero exit is not a tool failure: the command ran, and the model sees the exit code.
         return new ToolCompleted(RenderExec(result), IsError: false);
     }
 
-    /// <summary>Returns the first pattern (from Sandbox:DangerousCommandPatterns) the joined command
-    /// matches, or null. A malformed regex an operator added is skipped rather than thrown, the same
-    /// lenient-on-bad-config posture ParsePorts/ParsePortsLabel take elsewhere in this feature — a typo in
-    /// one pattern shouldn't take the whole safety net down.</summary>
-    private string? FindDangerousPattern(string joinedCommand)
+    /// <summary>True when the command matches one of Sandbox:DangerousCommandPatterns. A malformed pattern is skipped, so
+    /// one typo doesn't take down the whole check.</summary>
+    private bool IsDangerous(string joinedCommand)
     {
         foreach (var pattern in settings.Value.DangerousCommandPatterns)
         {
             try
             {
                 if (System.Text.RegularExpressions.Regex.IsMatch(joinedCommand, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-                    return pattern;
+                    return true;
             }
             catch (ArgumentException)
             {
-                // Malformed pattern in config -- skip it rather than fail every exec call.
             }
         }
-        return null;
+        return false;
     }
 
-    /// <summary>Exit code FIRST, then stdout, then stderr — history trimming (Agent:ToolResultMaxChars)
-    /// truncates a tool result from the END, so the exit code must never land somewhere that gets cut off.</summary>
+    /// <summary>Exit code and timeout notice first: history trimming cuts a tool result from the end.</summary>
     private string RenderExec(SandboxExecResult result)
     {
         var maxChars = Math.Max(0, settings.Value.MaxOutputCharsPerStream);
         var sb = new StringBuilder();
         sb.Append("Exit code: ").Append(result.ExitCode?.ToString() ?? "unknown");
-        // The timeout notice belongs on the FIRST line for the same reason the exit code does:
-        // appending it after stderr would put the single most important fact about the run in the
-        // exact position history trimming cuts from, so it would vanish precisely when the output
-        // is long enough for that to matter.
         if (result.TimedOut)
             sb.Append(" (command timed out and was terminated; output below is incomplete)");
         sb.Append('\n');
@@ -447,11 +355,7 @@ public sealed class SandboxTool(
         return sb.ToString();
     }
 
-    /// <summary>Caps defensively even though ISandboxHostClient already bounds each stream at the same
-    /// limit — the contract doesn't guarantee every implementation does, and this is what the immediate
-    /// ToolResultEvent pushed over SSE (never capped by history trimming) actually relies on. Tail-preserving:
-    /// for shell output the error is usually at the end, so a forced cut keeps the LAST characters, not the
-    /// first.</summary>
+    /// <summary>Keeps the end of the output, where a shell's error usually is.</summary>
     private static string RenderStream(string text, bool truncatedUpstream, int maxChars)
     {
         var truncated = truncatedUpstream;
@@ -463,9 +367,7 @@ public sealed class SandboxTool(
         return truncated ? $"[...output truncated...]\n{text}" : text;
     }
 
-    private async Task<ToolExecutionResult> ReadFileAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> ReadFileAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
@@ -473,21 +375,17 @@ public sealed class SandboxTool(
 
         var offset = Math.Max(0, arguments.GetIntArg("offset") ?? 0);
         var limit = Math.Max(0, arguments.GetIntArg("limit") ?? 0);
-
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Read, path,
-            Offset: offset, Limit: limit, MaxBytes: settings.Value.MaxFileTransferBytes), ct);
+        var response = await sandbox.FileOpAsync(new FileOpRequest(
+            Guid.NewGuid(), sandbox.Id, FileOp.Read, path, Offset: offset, Limit: limit, MaxBytes: settings.Value.MaxFileTransferBytes), ct);
         if (!response.Success)
             return new ToolCompleted(response.Error ?? $"Failed to read {path}.", IsError: true);
 
-        var content = DecodeUtf8(response.ContentBase64);
+        var content = string.IsNullOrEmpty(response.ContentBase64) ? "" : Encoding.UTF8.GetString(Convert.FromBase64String(response.ContentBase64));
         var note = response.Truncated ? "\n[... output truncated, use offset/limit to read more]" : "";
         return new ToolCompleted($"[{path}]\n{content}{note}");
     }
 
-    private async Task<ToolExecutionResult> WriteFileAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> WriteFileAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
@@ -503,18 +401,15 @@ public sealed class SandboxTool(
             return new ToolCompleted(
                 $"'content' is {bytes.LongLength} bytes, exceeding the configured limit of {settings.Value.MaxFileTransferBytes} bytes.", IsError: true);
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Write, path,
-            ContentBase64: Convert.ToBase64String(bytes), Append: append), ct);
+        var response = await sandbox.FileOpAsync(new FileOpRequest(
+            Guid.NewGuid(), sandbox.Id, FileOp.Write, path, ContentBase64: Convert.ToBase64String(bytes), Append: append), ct);
         if (!response.Success)
             return new ToolCompleted(response.Error ?? $"Failed to write {path}.", IsError: true);
 
         return new ToolCompleted($"{(append ? "Appended" : "Wrote")} {bytes.Length} bytes to {path}.");
     }
 
-    private async Task<ToolExecutionResult> EditFileAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> EditFileAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
@@ -528,26 +423,22 @@ public sealed class SandboxTool(
         if (newText is null)
             return new ToolCompleted("'new_text' is required for edit_file.", IsError: true);
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Edit, path, OldText: oldText, NewText: newText), ct);
+        var response = await sandbox.FileOpAsync(new FileOpRequest(
+            Guid.NewGuid(), sandbox.Id, FileOp.Edit, path, OldText: oldText, NewText: newText), ct);
         if (!response.Success)
             return new ToolCompleted(response.Error ?? $"Failed to edit {path}.", IsError: true);
 
-        // Reports the count rather than echoing content back, same contract as EditFileTool — lets the
-        // model tell a no-op (0) from a hit without re-reading the file.
+        // The count, not the content, like EditFileTool: the model can tell a no-op (0) without re-reading the file.
         return new ToolCompleted($"Replaced {response.ReplacementCount} occurrence(s) in {path}.");
     }
 
-    private async Task<ToolExecutionResult> ListFilesAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> ListFilesAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path)) path = ".";
         var recursive = GetBoolArg(arguments, "recursive") ?? false;
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.List, path, Recursive: recursive), ct);
+        var response = await sandbox.FileOpAsync(new FileOpRequest(Guid.NewGuid(), sandbox.Id, FileOp.List, path, Recursive: recursive), ct);
         if (!response.Success)
             return new ToolCompleted(response.Error ?? $"Failed to list {path}.", IsError: true);
 
@@ -563,9 +454,7 @@ public sealed class SandboxTool(
         return new ToolCompleted(sb.ToString());
     }
 
-    private async Task<ToolExecutionResult> SearchFilesAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> SearchFilesAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var pattern = arguments.GetStringArg("pattern");
         if (string.IsNullOrWhiteSpace(pattern))
@@ -574,8 +463,7 @@ public sealed class SandboxTool(
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path)) path = ".";
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Search, path, Pattern: pattern), ct);
+        var response = await sandbox.FileOpAsync(new FileOpRequest(Guid.NewGuid(), sandbox.Id, FileOp.Search, path, Pattern: pattern), ct);
         if (!response.Success)
             return new ToolCompleted(response.Error ?? "Search failed.", IsError: true);
 
@@ -591,26 +479,20 @@ public sealed class SandboxTool(
         return new ToolCompleted(sb.ToString());
     }
 
-    private async Task<ToolExecutionResult> DeleteAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> DeleteAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
             return new ToolCompleted("'path' is required for delete.", IsError: true);
 
         var recursive = GetBoolArg(arguments, "recursive") ?? false;
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Delete, path, Recursive: recursive), ct);
-        if (!response.Success)
-            return new ToolCompleted(response.Error ?? $"Failed to delete {path}.", IsError: true);
-
-        return new ToolCompleted($"Deleted {path}.");
+        var response = await sandbox.FileOpAsync(new FileOpRequest(Guid.NewGuid(), sandbox.Id, FileOp.Delete, path, Recursive: recursive), ct);
+        return response.Success
+            ? new ToolCompleted($"Deleted {path}.")
+            : new ToolCompleted(response.Error ?? $"Failed to delete {path}.", IsError: true);
     }
 
-    private async Task<ToolExecutionResult> MoveAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> MoveAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
@@ -620,36 +502,29 @@ public sealed class SandboxTool(
         if (string.IsNullOrWhiteSpace(destination))
             return new ToolCompleted("'destination' is required for move.", IsError: true);
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome, new FileOpRequest(
-            Guid.NewGuid(), sandboxId, FileOp.Move, path, DestinationPath: destination), ct);
-        if (!response.Success)
-            return new ToolCompleted(response.Error ?? $"Failed to move {path}.", IsError: true);
-
-        return new ToolCompleted($"Moved {path} to {destination}.");
+        var response = await sandbox.FileOpAsync(new FileOpRequest(Guid.NewGuid(), sandbox.Id, FileOp.Move, path, DestinationPath: destination), ct);
+        return response.Success
+            ? new ToolCompleted($"Moved {path} to {destination}.")
+            : new ToolCompleted(response.Error ?? $"Failed to move {path}.", IsError: true);
     }
 
-    private async Task<ToolExecutionResult> MkdirAsync(
-        SandboxOwner owner, Guid sandboxId, SandboxProvisioningService provisioning, SelfHealOutcome outcome,
-        JsonElement arguments, CancellationToken ct)
+    private async Task<ToolExecutionResult> MkdirAsync(Sandbox sandbox, JsonElement arguments, CancellationToken ct)
     {
         var path = arguments.GetStringArg("path");
         if (string.IsNullOrWhiteSpace(path))
             return new ToolCompleted("'path' is required for mkdir.", IsError: true);
 
-        var response = await FileOpWithSelfHealAsync(owner, sandboxId, provisioning, outcome,
-            new FileOpRequest(Guid.NewGuid(), sandboxId, FileOp.MakeDirectory, path), ct);
-        if (!response.Success)
-            return new ToolCompleted(response.Error ?? $"Failed to create directory {path}.", IsError: true);
-
-        return new ToolCompleted($"Created directory {path}.");
+        var response = await sandbox.FileOpAsync(new FileOpRequest(Guid.NewGuid(), sandbox.Id, FileOp.MakeDirectory, path), ct);
+        return response.Success
+            ? new ToolCompleted($"Created directory {path}.")
+            : new ToolCompleted(response.Error ?? $"Failed to create directory {path}.", IsError: true);
     }
 
-    private static string DecodeUtf8(string? base64) =>
-        string.IsNullOrEmpty(base64) ? "" : Encoding.UTF8.GetString(Convert.FromBase64String(base64));
-
-    private static bool? GetBoolArg(JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+    private static bool? GetBoolArg(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
         (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)
             ? v.GetBoolean()
             : null;
+    }
 }

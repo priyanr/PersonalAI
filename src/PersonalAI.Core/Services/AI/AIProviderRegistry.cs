@@ -9,11 +9,15 @@ public sealed class AIProviderRegistry(IEnumerable<IAIProvider> providers)
 
     public IReadOnlyList<IAIProvider> All => [.. _byKey.Values];
 
-    public IAIProvider Resolve(string providerKey) =>
-        _byKey.TryGetValue(providerKey, out var provider)
+    public IAIProvider Resolve(string providerKey)
+    {
+        return _byKey.TryGetValue(providerKey, out var provider)
             ? provider
             : throw new InvalidOperationException($"Unknown AI provider '{providerKey}'.");
+    }
 
-    public bool TryResolve(string providerKey, out IAIProvider? provider) =>
-        _byKey.TryGetValue(providerKey, out provider);
+    public bool TryResolve(string providerKey, out IAIProvider? provider)
+    {
+        return _byKey.TryGetValue(providerKey, out provider);
+    }
 }

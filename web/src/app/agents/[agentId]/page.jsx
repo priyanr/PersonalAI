@@ -10,6 +10,9 @@ import { formatNextRun } from "@/lib/schedule";
 import AgentForm from "@/components/agents/AgentForm";
 import AgentRunPanel from "@/components/agents/AgentRunPanel";
 import AgentRunHistory from "@/components/agents/AgentRunHistory";
+import AgentJobsPanel from "@/components/agents/AgentJobsPanel";
+import AlertRulesPanel from "@/components/alerts/AlertRulesPanel";
+import { AgentType } from "@/lib/enums";
 
 export default function AgentDetailPage() {
   const { agentId } = useParams();
@@ -52,6 +55,7 @@ export default function AgentDetailPage() {
           <button type="button" className="secondary" onClick={handleDelete}>
             Delete
           </button>
+          {agent.type === AgentType.DashboardAlerts && <Link href={`/agents/${agent.id}/dashboard`}>Dashboard</Link>}
           <Link href="/agents">← Agents</Link>
         </div>
       </div>
@@ -69,6 +73,9 @@ export default function AgentDetailPage() {
         submitting={submitting}
         error={error}
       />
+
+      {agent.type === AgentType.DashboardAlerts && <AgentJobsPanel agentId={agent.id} />}
+      {agent.type === AgentType.DashboardAlerts && <AlertRulesPanel agentId={agent.id} />}
 
       <AgentRunPanel agentId={agent.id} onRunComplete={() => {
           setHistoryRefreshKey((k) => k + 1);

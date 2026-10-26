@@ -19,7 +19,7 @@ namespace PersonalAI.Tests.Sandbox;
 /// create a sandbox that never existed for an owner.</summary>
 public class SandboxProvisioningServiceTests
 {
-    private sealed record Harness(SandboxProvisioningService Service, ISandboxRepository Repository, Mock<ISandboxHostClient> HostClient);
+    private sealed record Harness(SandboxProvisioningService Service, ISandboxRepository Repository, Mock<ISandboxHostClient> HostClient, AppDbContext Db);
 
     private static Harness NewHarness()
     {
@@ -34,7 +34,8 @@ public class SandboxProvisioningServiceTests
             .Setup(h => h.EnsureSandboxAsync(It.IsAny<Guid>(), It.IsAny<SandboxKind>(), It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<int>>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new SandboxEnsureResult("/data/sandbox/owner", [51000, 51001]));
 
-        return new Harness(new SandboxProvisioningService(hostClient.Object, repository), repository, hostClient);
+        var db = provider.GetRequiredService<AppDbContext>();
+        return new Harness(new SandboxProvisioningService(db, hostClient.Object, repository), repository, hostClient, db);
     }
 
     [Fact]
@@ -69,7 +70,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -92,7 +93,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Ephemeral,
             OwnerId = ownerId,
@@ -113,7 +114,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Ephemeral,
             OwnerId = ownerId,
@@ -137,7 +138,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        var instance = await h.Repository.AddAsync(new SandboxInstance
+        var instance = await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -158,7 +159,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -181,7 +182,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -214,7 +215,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = ownerId,
@@ -235,7 +236,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Ephemeral,
             OwnerId = ownerId,
@@ -254,7 +255,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var ownerId = Guid.NewGuid();
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Ephemeral,
             OwnerId = ownerId,
@@ -273,7 +274,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var owner = new SandboxOwner(SandboxOwnerKind.ChatSession, Guid.NewGuid());
-        var instance = await h.Repository.AddAsync(new SandboxInstance
+        var instance = await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = owner.Id,
@@ -317,7 +318,7 @@ public class SandboxProvisioningServiceTests
     {
         var h = NewHarness();
         var owner = new SandboxOwner(SandboxOwnerKind.ChatSession, Guid.NewGuid());
-        await h.Repository.AddAsync(new SandboxInstance
+        await TestSeed.SandboxAsync(h.Db, new SandboxInstance
         {
             Kind = SandboxKind.Session,
             OwnerId = owner.Id,

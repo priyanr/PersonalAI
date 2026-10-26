@@ -18,6 +18,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Agent> Agents => Set<Agent>();
     public DbSet<AgentRun> AgentRuns => Set<AgentRun>();
     public DbSet<SandboxInstance> SandboxInstances => Set<SandboxInstance>();
+    public DbSet<SshServerGroup> SshServerGroups => Set<SshServerGroup>();
+    public DbSet<SshServer> SshServers => Set<SshServer>();
+    public DbSet<Dataset> Datasets => Set<Dataset>();
+    public DbSet<DataPoint> DataPoints => Set<DataPoint>();
+    public DbSet<Dashboard> Dashboards => Set<Dashboard>();
+    public DbSet<DashboardVersion> DashboardVersions => Set<DashboardVersion>();
+    public DbSet<AlertRule> AlertRules => Set<AlertRule>();
+    public DbSet<AlertEvent> AlertEvents => Set<AlertEvent>();
+    public DbSet<CollectionJob> CollectionJobs => Set<CollectionJob>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -33,5 +42,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.ApplyConfiguration(new AgentConfiguration());
         modelBuilder.ApplyConfiguration(new AgentRunConfiguration());
         modelBuilder.ApplyConfiguration(new SandboxInstanceConfiguration());
+        modelBuilder.ApplyConfiguration(new SshServerGroupConfiguration());
+        modelBuilder.ApplyConfiguration(new SshServerConfiguration());
+        modelBuilder.ApplyConfiguration(new DatasetConfiguration());
+        modelBuilder.ApplyConfiguration(new DataPointConfiguration());
+        modelBuilder.ApplyConfiguration(new DashboardConfiguration());
+        modelBuilder.ApplyConfiguration(new DashboardVersionConfiguration());
+        modelBuilder.ApplyConfiguration(new AlertRuleConfiguration());
+        modelBuilder.ApplyConfiguration(new AlertEventConfiguration());
+        modelBuilder.ApplyConfiguration(new CollectionJobConfiguration());
     }
 }

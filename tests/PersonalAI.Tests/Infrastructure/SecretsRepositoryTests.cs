@@ -1,5 +1,6 @@
 using FluentAssertions;
 using PersonalAI.Core.Infrastructure;
+using PersonalAI.Core.Models.Entities;
 using PersonalAI.Core.Services.Secrets;
 using Microsoft.EntityFrameworkCore;
 
@@ -7,91 +8,40 @@ namespace PersonalAI.Tests.Infrastructure;
 
 public class SecretsRepositoryTests
 {
-    private static AppDbContext NewContext() => new(
-        new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
-
-    [Fact]
-    public async Task CreateAsync_ThenGetValueAsync_RoundTrips()
+    private static async Task<AppDbContext> NewContextWith(params Secret[] secrets)
     {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
-
-        await repo.CreateAsync("GITHUB_TOKEN", "ghp_abc", CancellationToken.None);
-        var value = await repo.GetValueAsync("GITHUB_TOKEN", CancellationToken.None);
-
-        value.Should().Be("ghp_abc");
+        var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+        db.Secrets.AddRange(secrets);
+        await db.SaveChangesAsync();
+        return db;
     }
 
     [Fact]
-    public async Task CreateAsync_DuplicateKey_Throws()
+    public async Task GetValueAsync_UnknownKey_ReturnsNull()
     {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
+        await using var db = await NewContextWith(new Secret { Key = "A", Value = "1" });
 
-        await repo.CreateAsync("GITHUB_TOKEN", "ghp_abc", CancellationToken.None);
-
-        var act = () => repo.CreateAsync("GITHUB_TOKEN", "ghp_other", CancellationToken.None);
-        await act.Should().ThrowAsync<InvalidOperationException>();
+        (await new SecretsRepository(db).GetValueAsync("B", CancellationToken.None)).Should().BeNull();
     }
 
     [Fact]
-    public async Task UpdateValueAsync_ExistingKey_UpdatesValue()
+    public async Task GetValuesAsync_ReturnsOnlyRequestedKeysThatHaveAValue()
     {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
-        await repo.CreateAsync("GITHUB_TOKEN", "ghp_old", CancellationToken.None);
+        await using var db = await NewContextWith(
+            new Secret { Key = "A", Value = "1" },
+            new Secret { Key = "B", Value = "" },
+            new Secret { Key = "C", Value = "3" });
 
-        var updated = await repo.UpdateValueAsync("GITHUB_TOKEN", "ghp_new", CancellationToken.None);
+        var values = await new SecretsRepository(db).GetValuesAsync(["A", "B", "MISSING"], CancellationToken.None);
 
-        updated.Should().BeTrue();
-        (await repo.GetValueAsync("GITHUB_TOKEN", CancellationToken.None)).Should().Be("ghp_new");
+        values.Should().Equal(new Dictionary<string, string> { ["A"] = "1" });
     }
 
     [Fact]
-    public async Task UpdateValueAsync_UnknownKey_ReturnsFalse()
+    public async Task GetAllAsync_IsOrderedByKey()
     {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
+        await using var db = await NewContextWith(new Secret { Key = "B" }, new Secret { Key = "A" });
 
-        var updated = await repo.UpdateValueAsync("does-not-exist", "value", CancellationToken.None);
-
-        updated.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task DeleteAsync_ExistingKey_RemovesIt()
-    {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
-        await repo.CreateAsync("GITHUB_TOKEN", "ghp_abc", CancellationToken.None);
-
-        var deleted = await repo.DeleteAsync("GITHUB_TOKEN", CancellationToken.None);
-
-        deleted.Should().BeTrue();
-        (await repo.GetValueAsync("GITHUB_TOKEN", CancellationToken.None)).Should().BeNull();
-    }
-
-    [Fact]
-    public async Task DeleteAsync_UnknownKey_ReturnsFalse()
-    {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
-
-        var deleted = await repo.DeleteAsync("does-not-exist", CancellationToken.None);
-
-        deleted.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task GetAllAsync_ReturnsSecretsOrderedByKey()
-    {
-        await using var db = NewContext();
-        var repo = new SecretsRepository(db);
-        await repo.CreateAsync("ZKEY", "z", CancellationToken.None);
-        await repo.CreateAsync("AKEY", "a", CancellationToken.None);
-
-        var all = await repo.GetAllAsync(CancellationToken.None);
-
-        all.Select(s => s.Key).Should().ContainInOrder("AKEY", "ZKEY");
+        (await new SecretsRepository(db).GetAllAsync(CancellationToken.None)).Select(s => s.Key).Should().Equal("A", "B");
     }
 }

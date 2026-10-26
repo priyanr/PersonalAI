@@ -1,7 +1,7 @@
 namespace PersonalAI.Core.Services.Settings;
 
 /// <summary>In-memory snapshot of AppSettings, kept in sync with the DB by the startup load and by
-/// AppSettingsController after every update, so tools can read it synchronously on the hot path.</summary>
+/// AppSettingsService after every update, so tools can read it synchronously on the hot path.</summary>
 public sealed class AppSettingsCache
 {
     public const string DefaultWebSearchGuidance =

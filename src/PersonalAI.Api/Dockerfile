@@ -14,9 +14,14 @@ RUN dotnet publish src/PersonalAI.Api/PersonalAI.Api.csproj -c Release -o /app -
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
-COPY --from=build /app .
+COPY --from=build --chown=$APP_UID /app .
+
+# Mount points for the SQLite db and workspace; created here so they are writable by the non-root user
+RUN mkdir -p /data /workspace && chown $APP_UID /data /workspace
 
 ENV ASPNETCORE_URLS=http://+:8080
 EXPOSE 8080
+
+USER $APP_UID
 
 ENTRYPOINT ["dotnet", "PersonalAI.Api.dll"]

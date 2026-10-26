@@ -13,22 +13,22 @@ using Microsoft.Extensions.Options;
 
 namespace PersonalAI.Core.Services.Skills;
 
-/// <summary>Executes a Skill's prompt through its own short agentic loop, independent of ChatAgentService
-/// and ChatSession — nothing here is persisted to the database; the loop lives only for the duration of
-/// one RunAsync call.</summary>
+/// <summary>Runs a Skill: its prompt through a short agent loop with only the skill's tools and secrets. Nothing is
+/// saved; the conversation lives for one run.</summary>
 public sealed class SkillExecutionService(
     ISkillsRepository skillsRepo,
     AIProviderRegistry providers,
     ToolRegistry tools,
-    SecretsCache secrets,
+    ISecretsRepository secrets,
     IOptions<AgentSettings> agentSettings,
     ISandboxHostClient sandboxHostClient,
-    ILogger<SkillExecutionService> logger) : ISkillExecutionService
+    ILogger<SkillExecutionService> logger)
 {
+    /// <summary>Runs the skill until the model answers or hits the call cap. No user is there to approve anything, so a
+    /// tool call that needs approval is refused instead of pausing.</summary>
     public async IAsyncEnumerable<AgentStreamEvent> RunAsync(Guid skillId, string? input, [EnumeratorCancellation] CancellationToken ct)
     {
-        // In-memory only, like the rest of this class — this run's own ephemeral sandbox is torn down
-        // in the finally below regardless of how the run ends (success, failure, cancellation).
+        // Tools run in this run's own sandbox, which the finally below removes however the run ends.
         var runId = Guid.NewGuid();
         try
         {
@@ -37,9 +37,7 @@ public sealed class SkillExecutionService(
         }
         finally
         {
-            // Skipping entirely when no host is connected avoids exception noise on every run in
-            // deployments that never enable the sandbox feature — if it were never connected, no
-            // sandbox could have been created for this runId either.
+            // Without a connected host no sandbox can exist for this run, so there is nothing to remove.
             if (sandboxHostClient.IsConnected)
             {
                 try
@@ -48,8 +46,7 @@ public sealed class SkillExecutionService(
                 }
                 catch (Exception ex)
                 {
-                    // A failed teardown must never mask the run's real outcome — this is a best-effort
-                    // safety net; the reaper's EphemeralGraceMinutes sweep is the backstop if it fails.
+                    // Best effort: a failed teardown must not hide the run's outcome; the reaper removes it later.
                     logger.LogWarning(ex, "Failed to tear down ephemeral sandbox for skill run {RunId}.", runId);
                 }
             }
@@ -64,7 +61,7 @@ public sealed class SkillExecutionService(
         var enabledTools = new HashSet<string>(
             JsonSerializer.Deserialize<List<string>>(skill.EnabledToolsJson) ?? [], StringComparer.OrdinalIgnoreCase);
         var secretKeys = JsonSerializer.Deserialize<List<string>>(skill.SecretKeysJson) ?? [];
-        var availableSecrets = ResolveSecrets(secretKeys);
+        var availableSecrets = await secrets.GetValuesAsync(secretKeys, ct);
 
         var provider = providers.Resolve(skill.ProviderKey);
         var toolDefinitions = tools.Definitions.Where(d => enabledTools.Contains(d.Name)).ToList();
@@ -182,16 +179,12 @@ public sealed class SkillExecutionService(
                     continue;
                 }
 
-                ToolExecutionResult? result = null;
-                string? executionError = null;
-
-                var channel = System.Threading.Channels.Channel.CreateUnbounded<AgentStreamEvent>();
-                var executionTask = Task.Run(async () =>
+                var (progress, execution) = ProgressStream.Run(async onProgress =>
                 {
                     try
                     {
                         var res = await tool.ExecuteAsync(arguments,
-                            new ToolExecutionContext(PreApproved: false, Sandbox: new SandboxOwner(SandboxOwnerKind.SkillRun, runId), OnProgress: msg => channel.Writer.TryWrite(new ToolProgressEvent(Guid.Empty, call.Name, msg))), ct);
+                            new ToolExecutionContext(PreApproved: false, Sandbox: new SandboxOwner(SandboxOwnerKind.SkillRun, runId), OnProgress: onProgress), ct);
                         return (Result: res, Error: (string?)null);
                     }
                     catch (OperationCanceledException) { throw; }
@@ -199,23 +192,9 @@ public sealed class SkillExecutionService(
                     {
                         return (Result: (ToolExecutionResult?)null, Error: $"Tool execution failed: {ex.Message}");
                     }
-                    finally
-                    {
-                        channel.Writer.Complete();
-                    }
-                }, ct);
-
-                while (true)
-                {
-                    var finished = await Task.WhenAny(executionTask, channel.Reader.WaitToReadAsync(ct).AsTask());
-                    if (finished == executionTask) break;
-                    while (channel.Reader.TryRead(out var evt)) yield return evt;
-                }
-                while (channel.Reader.TryRead(out var evt)) yield return evt;
-
-                var taskResult = await executionTask;
-                result = taskResult.Result;
-                executionError = taskResult.Error;
+                }, msg => new ToolProgressEvent(Guid.Empty, call.Name, msg), ct);
+                await foreach (var evt in progress) yield return evt;
+                var (result, executionError) = await execution;
 
                 if (executionError is not null)
                 {
@@ -250,16 +229,41 @@ public sealed class SkillExecutionService(
         yield return new ErrorEvent($"Stopped after {maxIterations} tool iterations without a final answer.");
     }
 
-    private Dictionary<string, string> ResolveSecrets(IReadOnlyList<string> secretKeys)
+    /// <summary>Runs the skill to the end and folds it into one tool result, as the chat and agent loops show it to
+    /// their model: the skill's text, and whether it failed.</summary>
+    public async Task<(string Content, bool Failed)> RunAsToolAsync(Guid skillId, string? input, CancellationToken ct)
     {
-        var resolved = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var key in secretKeys)
+        var output = new StringBuilder();
+        var failed = false;
+        try
         {
-            var value = secrets.GetValue(key);
-            if (!string.IsNullOrEmpty(value))
-                resolved[key] = value;
+            await foreach (var evt in RunAsync(skillId, input, ct))
+            {
+                switch (evt)
+                {
+                    case TextDeltaEvent d:
+                        output.Append(d.Text);
+                        break;
+                    case ToolResultEvent t when t.IsError:
+                        failed = true;
+                        break;
+                    case ErrorEvent e:
+                        failed = true;
+                        if (output.Length > 0) output.Append('\n');
+                        output.Append(e.Message);
+                        break;
+                }
+            }
         }
-        return resolved;
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            failed = true;
+            output.Append(ex.Message);
+        }
+
+        var content = output.Length > 0 ? output.ToString() : failed ? "Skill run failed." : "Skill produced no output.";
+        return (content, failed);
     }
 
     private static string BuildSystemPrompt(string prompt, IReadOnlyList<string> secretKeys)

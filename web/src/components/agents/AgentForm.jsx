@@ -1,14 +1,18 @@
 "use client";
 
 import { useState } from "react";
+import DataSourceScopes from "./DataSourceScopes";
 import { useModels } from "@/hooks/useModels";
 import ModelSelect from "@/components/models/ModelSelect";
 import { useProviders } from "@/hooks/useProviders";
 import { useSkills } from "@/hooks/useSkills";
 import {
   AGENT_SCHEDULE_KIND_OPTIONS,
+  AGENT_TYPE_OPTIONS,
   AgentScheduleKind,
+  AgentType,
   CONTEXT_SIZE_OPTIONS,
+  DASHBOARD_COLLECT_INTERVAL_RANGE,
   REASONING_EFFORT_OPTIONS,
   SKILL_TOOL_OPTIONS
 } from "@/lib/enums";
@@ -31,6 +35,17 @@ function fromDatetimeLocalValue(value) {
 export default function AgentForm({ initial, onSubmit, submitLabel, submitting, error }) {
   const { providers } = useProviders();
   const { skills } = useSkills();
+  const [type, setType] = useState(initial?.type ?? AgentType.General);
+  const [collectIntervalMinutes, setCollectIntervalMinutes] = useState(
+    String(initial?.typeConfig?.collectIntervalMinutes ?? 5)
+  );
+  const [requireJobApproval, setRequireJobApproval] = useState(initial?.typeConfig?.requireJobApproval ?? true);
+  // What the agent may reach, per data tool. An agent saved before data sources were generic has targetGroupIds: those are its SSH scope.
+  const [toolScopes, setToolScopes] = useState(
+    initial?.typeConfig?.toolScopes ??
+      (initial?.typeConfig?.targetGroupIds?.length ? { ssh: initial.typeConfig.targetGroupIds } : {})
+  );
+  const [retentionDays, setRetentionDays] = useState(String(initial?.typeConfig?.retentionDays ?? 30));
   const [name, setName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
@@ -62,6 +77,16 @@ export default function AgentForm({ initial, onSubmit, submitLabel, submitting, 
   function handleSubmit(e) {
     e.preventDefault();
     onSubmit({
+      type,
+      typeConfig:
+        type === AgentType.DashboardAlerts
+          ? {
+              toolScopes,
+              collectIntervalMinutes: Number(collectIntervalMinutes),
+              requireJobApproval,
+              retentionDays: Number(retentionDays)
+            }
+          : {},
       name: name.trim(),
       description: description.trim() || null,
       prompt,
@@ -82,6 +107,18 @@ export default function AgentForm({ initial, onSubmit, submitLabel, submitting, 
 
   return (
     <form className="skill-form" onSubmit={handleSubmit}>
+      <label>
+        Agent type
+        <select value={type} onChange={(e) => setType(Number(e.target.value))}>
+          {AGENT_TYPE_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="muted">{AGENT_TYPE_OPTIONS.find((o) => o.value === type)?.description}</p>
+
       <label>
         Name
         <input type="text" value={name} onChange={(e) => setName(e.target.value)} required />
@@ -164,6 +201,54 @@ export default function AgentForm({ initial, onSubmit, submitLabel, submitting, 
         so it can wrap up in time. Leave blank to use the server default. Reasoning effort only affects
         reasoning models; &quot;Model default&quot; uses the model&apos;s setting on the Models page.
       </p>
+
+      {type === AgentType.DashboardAlerts && (
+        <fieldset className="skill-form-fieldset">
+          <legend>Data sources</legend>
+          <DataSourceScopes value={toolScopes} onChange={setToolScopes} />
+        </fieldset>
+      )}
+
+      {type === AgentType.DashboardAlerts && (
+        <fieldset className="skill-form-fieldset">
+          <legend>Dashboard &amp; alerts settings</legend>
+          <div className="skill-form-row">
+            <label>
+              Default job interval (minutes)
+              <input
+                type="number"
+                min={DASHBOARD_COLLECT_INTERVAL_RANGE.min}
+                max={DASHBOARD_COLLECT_INTERVAL_RANGE.max}
+                value={collectIntervalMinutes}
+                onChange={(e) => setCollectIntervalMinutes(e.target.value)}
+                required
+              />
+            </label>
+            <label>
+              Keep raw data (days)
+              <input
+                type="number"
+                min={1}
+                value={retentionDays}
+                onChange={(e) => setRetentionDays(e.target.value)}
+                required
+              />
+            </label>
+          </div>
+          <label className="settings-checkbox">
+            <input type="checkbox" checked={requireJobApproval} onChange={(e) => setRequireJobApproval(e.target.checked)} />
+            Require my approval before collection jobs the model creates can run (recommended)
+          </label>
+          <p className="muted">
+            The model designs collection jobs (a request to one of your data sources, how to parse it, where to store it)
+            in the run below; once approved, they run on their own intervals without the model. With approval on, you see
+            the exact request first. The Prompt and Schedule control the model run that designs jobs, the dashboard and
+            the alert rules. Each data tool limits what the model may send in its own settings under Settings &gt; Tools
+            (for SSH, the allowed commands). Anything outside a tool&apos;s allowed list always needs your approval, even with
+            approval turned off here.
+          </p>
+        </fieldset>
+      )}
 
       <fieldset className="skill-form-fieldset">
         <legend>Skills this agent may invoke</legend>

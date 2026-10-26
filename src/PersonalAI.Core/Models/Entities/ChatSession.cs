@@ -26,7 +26,7 @@ public class ChatSession
     public bool TrimHistoryEnabled { get; set; } = true;
 
     /// <summary>Running summary of every ChatMessage up to and including SummarizedThroughSequenceNumber,
-    /// folded in by ChatAgentService.EnsureHistoryCompactedAsync once enough history has aged out of the
+    /// folded in by ChatHistoryCompaction.CompactIfDueAsync once enough history has aged out of the
     /// keep window. Null means nothing has been compacted yet. See COMPACTION_ARCHITECTURE.md.</summary>
     public string? HistorySummary { get; set; }
 
@@ -51,7 +51,7 @@ public class ChatSession
     public long TotalOutputTokens { get; set; }
 
     /// <summary>JSON array of Skill.Id values this session's model may invoke as tools (each exposed as
-    /// "skill_&lt;slug&gt;", run via ISkillExecutionService and folded back in as one tool result). Only
+    /// "skill_&lt;slug&gt;", run via SkillExecutionService and folded back in as one tool result). Only
     /// consulted when ToolsEnabled is true — Skills are advertised through the same tool channel.</summary>
     public string EnabledSkillIdsJson { get; set; } = "[]";
 

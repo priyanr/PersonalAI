@@ -28,10 +28,15 @@ public sealed class Workspace(IOptions<WorkspaceSettings> settings)
         return new WorkspacePathResolution(full, isInside, LooksLikeSandboxWorkPath(path));
     }
 
-    public string ToRelative(string fullPath) => Path.GetRelativePath(Root, fullPath);
+    public string ToRelative(string fullPath)
+    {
+        return Path.GetRelativePath(Root, fullPath);
+    }
 
-    public static bool IsIgnoredDirectory(string directoryName) =>
-        IgnoredDirectories.Contains(directoryName, StringComparer.OrdinalIgnoreCase);
+    public static bool IsIgnoredDirectory(string directoryName)
+    {
+        return IgnoredDirectories.Contains(directoryName, StringComparer.OrdinalIgnoreCase);
+    }
 
     /// <summary>True when the model-supplied path is rooted at (or under) "/work" — the sandbox tool's
     /// mount point inside its own container, never this workspace (Workspace:RootPath is "./data/workspace"
@@ -51,9 +56,11 @@ public sealed class Workspace(IOptions<WorkspaceSettings> settings)
 
     /// <summary>Shared corrective message every in-process file tool returns for a LooksLikeSandboxPath
     /// hit, instead of the ordinary outside-workspace approval prompt.</summary>
-    public static string SandboxPathHint(string path) =>
-        $"'{path}' looks like it was meant for the sandbox tool's /work directory, not this " +
+    public static string SandboxPathHint(string path)
+    {
+        return $"'{path}' looks like it was meant for the sandbox tool's /work directory, not this " +
         "workspace-confined tool — they are different filesystems on different machines. Use the " +
         "sandbox tool's own read_file/write_file/edit_file/list_files/search_files actions for files " +
         "inside the sandbox instead.";
+    }
 }

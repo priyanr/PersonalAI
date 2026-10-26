@@ -39,7 +39,7 @@ The heart of chat. Each user message triggers an iterative loop:
 ### Key Design Decisions
 
 - **Stateless HTTP**: every entry point reloads conversation state from the DB. A tool-approval pause is "stop and persist", resumable by a separate HTTP request.
-- **Turns run in the background, not on the request**: `ChatTurnRunner` (singleton, `IChatTurnRunner`) owns
+- **Turns run in the background, not on the request**: `ChatTurnRunner` (singleton) owns
   every running turn — one per session, each on its own DI scope — and the SSE response merely subscribes.
   Closing the tab or reloading only detaches the viewer; a reloaded page sees `isTurnRunning` on the session
   and re-attaches via `GET /api/sessions/{id}/turn/stream`, which replays the turn so far (tokens coalesced)
@@ -86,7 +86,7 @@ Two more entities reuse the same "agentic loop" shape as `ChatAgentService`, but
     secret as `{{secret.KEY}}` inside tool call arguments; `SecretSubstitution` swaps in the real value
     immediately before the tool executes, so only the placeholder ever appears in conversation history.
 - **Agent** (`Agent` entity) — its own prompt orchestrating a loop whose "tools" are the user's **Skills**
-  (each exposed as a tool named `skill_<slug>`, invoked via `ISkillExecutionService` and folded back in as
+  (each exposed as a tool named `skill_<slug>`, invoked via `SkillExecutionService` and folded back in as
   one tool result — a loop nested inside a loop). Runs on demand (`POST /api/agents/{id}/run`, SSE) or on
   a schedule: `ScheduleKind` is `Manual` / `Once` / `Interval` / `Cron`, computed into a `NextRunAt` so the
   scheduler's poll is a cheap lookup. `AgentSchedulerHostedService` polls due agents every
@@ -101,8 +101,7 @@ Two more entities reuse the same "agentic loop" shape as `ChatAgentService`, but
 ## Secrets Vault
 
 A general-purpose key/value store (`Secret` entity: `Key`, `Value`, `UpdatedAt`), separate from the
-per-provider `AIProviderConfig` table, for Skills to read via `SecretKeysJson`. `SecretsCache` mirrors the
-DB in memory. `/api/secrets` never echoes a stored value back — only a `HasValue` flag — and a duplicate
+per-provider `AIProviderConfig` table, for Skills to read via `SecretKeysJson`; a skill run loads the values it is allowed in one query. `/api/secrets` never echoes a stored value back — only a `HasValue` flag — and a duplicate
 `Key` on create returns `409`. Same plaintext-in-local-SQLite trust model as `AIProviderConfig` and
 `ToolConfig` — not a hardened vault.
 

@@ -1,16 +1,9 @@
 namespace PersonalAI.Core.Models.Settings;
 
-/// <summary>Delegates login to an external OAuth2 / OpenID Connect provider (Authorization Code grant,
-/// with PKCE when the browser supplies a challenge) instead of PersonalAI managing its own
-/// users/passwords. Pure REST/bearer-token model: the API issues the provider's access/refresh tokens
-/// back to the caller as JSON (the frontend stores them and sends them as an Authorization header)
-/// rather than setting any cookies. When <see cref="Enabled"/> is false (the default), no
-/// authentication is enforced anywhere — local `dotnet run` behaves exactly as before.
-///
-/// Provider-neutral: endpoints come from OIDC discovery (<c>{Authority}/.well-known/openid-configuration</c>)
-/// unless set explicitly, and access tokens are verified against the provider's published signing keys
-/// (JWKS) unless a shared symmetric <see cref="JwtKey"/> is configured. A provider without discovery
-/// sets <see cref="UseDiscovery"/> to false and lists its endpoints.</summary>
+/// <summary>Login through an external OAuth2 / OpenID Connect provider (Authorization Code, with PKCE). The API hands
+/// the provider's tokens to the web app as JSON, which sends them back as a bearer header; no cookies. Endpoints come
+/// from OIDC discovery unless listed, and tokens are checked against the provider's JWKS unless <see cref="JwtKey"/>
+/// is set. With <see cref="Enabled"/> false (the default) nothing requires login.</summary>
 public class AuthSettings
 {
     public const string SectionName = "Auth";
@@ -112,8 +105,10 @@ public class AuthSettings
         return $"{Authority.TrimEnd('/')}/{endpoint.TrimStart('/')}";
     }
 
-    public string ResolveMetadataAddress() =>
-        string.IsNullOrWhiteSpace(MetadataAddress)
+    public string ResolveMetadataAddress()
+    {
+        return string.IsNullOrWhiteSpace(MetadataAddress)
             ? $"{Authority.TrimEnd('/')}/.well-known/openid-configuration"
             : ResolveEndpoint(MetadataAddress);
+    }
 }

@@ -1,13 +1,19 @@
-using PersonalAI.Core.Interfaces;
+using PersonalAI.Core.Services.Agent;
 
 namespace PersonalAI.Api.BackgroundServices;
 
 /// <summary>On shutdown, stops every background chat turn and gives each the host's shutdown window to
 /// record its interruption, so a restart mid-turn leaves "Turn interrupted: the server shut down" in the
 /// transcript instead of a tool call that silently never got a result.</summary>
-public sealed class ChatTurnShutdownService(IChatTurnRunner turns) : IHostedService
+public sealed class ChatTurnShutdownService(ChatTurnRunner turns) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
 
-    public Task StopAsync(CancellationToken cancellationToken) => turns.StopAllAsync(cancellationToken);
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return turns.StopAllAsync(cancellationToken);
+    }
 }

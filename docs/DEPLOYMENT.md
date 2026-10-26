@@ -45,6 +45,11 @@ docker compose up -d --build
   daemon can bind (on macOS, somewhere under a Docker Desktop shared folder such as `/Users/<you>/...`).
 - Data (SQLite DB, workspace, Ollama models) lives in the host folders above and survives
   `docker compose down`.
+- The API container runs as a **non-root user** (UID 1654, `API_UID`). Docker creates bind-mounted host folders
+  as root on Linux, so a one-shot `api-init` service chowns `SQLITE_DATA_PATH` and `WORKSPACE_DATA_PATH` to that
+  UID before the API starts (the `chown` baked into the image is hidden by the bind mounts). It is idempotent and
+  needs nothing from you. If you run the image another way, give the user it runs as write access to `/data` and
+  `/workspace`, or the API fails at startup with "unable to open database file".
 - `computer_control` is Windows-only and does nothing useful inside the Linux API container — run the
   API with `dotnet run` on Windows if you want it.
 

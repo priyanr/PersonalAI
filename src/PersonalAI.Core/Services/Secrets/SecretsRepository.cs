@@ -1,47 +1,43 @@
 using PersonalAI.Core.Infrastructure;
-using PersonalAI.Core.Interfaces;
 using PersonalAI.Core.Models.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace PersonalAI.Core.Services.Secrets;
 
+public interface ISecretsRepository
+{
+    Task<List<Secret>> GetAllAsync(CancellationToken ct);
+
+    /// <summary>The tracked secret, or null if no secret has that key.</summary>
+    Task<Secret?> GetAsync(string key, CancellationToken ct);
+
+    Task<string?> GetValueAsync(string key, CancellationToken ct);
+
+    /// <summary>The set values of <paramref name="keys"/>; keys with no secret or an empty value are left out.</summary>
+    Task<Dictionary<string, string>> GetValuesAsync(IReadOnlyList<string> keys, CancellationToken ct);
+}
+
 public class SecretsRepository(AppDbContext db) : ISecretsRepository
 {
-    public async Task<IReadOnlyList<Secret>> GetAllAsync(CancellationToken ct) =>
-        await db.Secrets.OrderBy(s => s.Key).ToListAsync(ct);
-
-    public async Task<string?> GetValueAsync(string key, CancellationToken ct) =>
-        (await db.Secrets.FirstOrDefaultAsync(s => s.Key == key, ct))?.Value;
-
-    public async Task<Secret> CreateAsync(string key, string value, CancellationToken ct)
+    public async Task<List<Secret>> GetAllAsync(CancellationToken ct)
     {
-        if (await db.Secrets.AnyAsync(s => s.Key == key, ct))
-            throw new InvalidOperationException($"A secret with key '{key}' already exists.");
-
-        var secret = new Secret { Key = key, Value = value, UpdatedAt = DateTimeOffset.UtcNow };
-        db.Secrets.Add(secret);
-        await db.SaveChangesAsync(ct);
-        return secret;
+        return await db.Secrets.AsNoTracking().OrderBy(s => s.Key).ToListAsync(ct);
     }
 
-    public async Task<bool> UpdateValueAsync(string key, string value, CancellationToken ct)
+    public async Task<Secret?> GetAsync(string key, CancellationToken ct)
     {
-        var secret = await db.Secrets.FirstOrDefaultAsync(s => s.Key == key, ct);
-        if (secret is null) return false;
-
-        secret.Value = value;
-        secret.UpdatedAt = DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(ct);
-        return true;
+        return await db.Secrets.FirstOrDefaultAsync(s => s.Key == key, ct);
     }
 
-    public async Task<bool> DeleteAsync(string key, CancellationToken ct)
+    public async Task<string?> GetValueAsync(string key, CancellationToken ct)
     {
-        var secret = await db.Secrets.FirstOrDefaultAsync(s => s.Key == key, ct);
-        if (secret is null) return false;
+        return await db.Secrets.Where(s => s.Key == key).Select(s => s.Value).FirstOrDefaultAsync(ct);
+    }
 
-        db.Secrets.Remove(secret);
-        await db.SaveChangesAsync(ct);
-        return true;
+    public async Task<Dictionary<string, string>> GetValuesAsync(IReadOnlyList<string> keys, CancellationToken ct)
+    {
+        return await db.Secrets.AsNoTracking()
+            .Where(s => keys.Contains(s.Key) && s.Value != null && s.Value != "")
+            .ToDictionaryAsync(s => s.Key, s => s.Value!, StringComparer.Ordinal, ct);
     }
 }

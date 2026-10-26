@@ -24,9 +24,11 @@ public class ChatAgentServiceInterruptionTests
         new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 
     private static ChatAgentService CreateService(AppDbContext db, FakeAIProvider provider, ToolRegistry tools) => new(
+        db,
         new ChatSessionRepository(db),
         new SkillsRepository(db),
-        new FakeSkillExecutionService((_, _) => []),
+        new FakeSkillProvider().CreateService(db),
+        new ChatHistoryCompaction(db, new AIProviderRegistry([(IAIProvider)provider]), Options.Create(new AgentSettings { MaxIterations = 25 })),
         new AIProviderRegistry([(IAIProvider)provider]),
         tools,
         Options.Create(new OllamaSettings { BaseUrl = "http://localhost:11434", DefaultSystemPrompt = "system" }),
@@ -55,7 +57,7 @@ public class ChatAgentServiceInterruptionTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "m", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "m", CancellationToken.None);
         var service = CreateService(db, new FakeAIProvider([new AiChatChunk("Hi", null, true)]), new ToolRegistry([]));
 
         var events = new List<AgentStreamEvent>();
@@ -71,7 +73,7 @@ public class ChatAgentServiceInterruptionTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "m", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "m", CancellationToken.None);
         var tool = new BlockingTool("slow_tool");
         var provider = new FakeAIProvider([new AiChatChunk("", [new AiToolCall("call1", "slow_tool", "{}")], true)]);
         var service = CreateService(db, provider, new ToolRegistry([tool]));
@@ -102,8 +104,8 @@ public class ChatAgentServiceInterruptionTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "m", CancellationToken.None);
-        await repo.AppendMessageAsync(new() { SessionId = session.Id, Role = MessageRole.User, Content = "q" }, CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "m", CancellationToken.None);
+        await TestSeed.MessageAsync(db, new() { SessionId = session.Id, Role = MessageRole.User, Content = "q" }, CancellationToken.None);
         var service = CreateService(db, new FakeAIProvider(), new ToolRegistry([]));
 
         await service.FinalizeInterruptedTurnAsync(session.Id, "Half an ans", "stopped by the user", "Turn interrupted: stopped by the user.", CancellationToken.None);
@@ -120,14 +122,14 @@ public class ChatAgentServiceInterruptionTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "m", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "m", CancellationToken.None);
         var calls = new List<AiToolCall> { new("done", "t", "{}"), new("pending", "t", "{}"), new("orphan", "t", "{}") };
-        var assistant = await repo.AppendMessageAsync(new()
+        var assistant = await TestSeed.MessageAsync(db, new()
         {
             SessionId = session.Id, Role = MessageRole.Assistant, Content = "", ToolCallsJson = JsonSerializer.Serialize(calls)
         }, CancellationToken.None);
-        await repo.AppendMessageAsync(new() { SessionId = session.Id, Role = MessageRole.Tool, ToolCallId = "done", ToolName = "t", Content = "ok" }, CancellationToken.None);
-        await repo.CreateToolInvocationAsync(new()
+        await TestSeed.MessageAsync(db, new() { SessionId = session.Id, Role = MessageRole.Tool, ToolCallId = "done", ToolName = "t", Content = "ok" }, CancellationToken.None);
+        await TestSeed.ToolInvocationAsync(db, new()
         {
             SessionId = session.Id, RequestingMessageId = assistant.Id, ToolCallId = "pending", ToolName = "t",
             ArgumentsJson = "{}", Status = ToolInvocationStatus.PendingApproval, ResolvedPath = "/x", Reason = "r"

@@ -1,15 +1,19 @@
 using PersonalAI.Core.Infrastructure;
-using PersonalAI.Core.Interfaces;
-using PersonalAI.Core.Models.Entities;
 using Microsoft.EntityFrameworkCore;
 
 namespace PersonalAI.Core.Services.AI;
+
+public interface IModelConfigRepository
+{
+    /// <summary>Every saved model setting, keyed by provider, then model name, then field name.</summary>
+    Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string?>>>> GetAllAsync(CancellationToken ct);
+}
 
 public class ModelConfigRepository(AppDbContext db) : IModelConfigRepository
 {
     public async Task<IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyDictionary<string, string?>>>> GetAllAsync(CancellationToken ct)
     {
-        var all = await db.ModelConfigs.ToListAsync(ct);
+        var all = await db.ModelConfigs.AsNoTracking().ToListAsync(ct);
         return all
             .GroupBy(c => c.ProviderKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
@@ -20,21 +24,5 @@ public class ModelConfigRepository(AppDbContext db) : IModelConfigRepository
                         m => m.Key,
                         m => (IReadOnlyDictionary<string, string?>)m.ToDictionary(c => c.FieldName, c => c.Value)),
                 StringComparer.OrdinalIgnoreCase);
-    }
-
-    public async Task ReplaceAsync(string providerKey, string modelName, IReadOnlyDictionary<string, string?> values, CancellationToken ct)
-    {
-        var existing = await db.ModelConfigs
-            .Where(c => c.ProviderKey == providerKey && c.ModelName == modelName)
-            .ToListAsync(ct);
-        db.ModelConfigs.RemoveRange(existing);
-
-        foreach (var (fieldName, value) in values)
-        {
-            if (string.IsNullOrWhiteSpace(value)) continue;
-            db.ModelConfigs.Add(new ModelConfig { ProviderKey = providerKey, ModelName = modelName, FieldName = fieldName, Value = value });
-        }
-
-        await db.SaveChangesAsync(ct);
     }
 }

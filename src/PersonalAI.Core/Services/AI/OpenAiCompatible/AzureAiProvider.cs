@@ -25,8 +25,10 @@ public sealed class AzureAiProvider(HttpClient httpClient, AIProviderConfigCache
     // field with a 400 BadRequestForDependentService from the underlying model service.
     private static readonly string[] ReasoningModelMarkers = ["gpt-5", "o1", "o3", "o4"];
 
-    protected override bool UseMaxCompletionTokens(string model) =>
-        ReasoningModelMarkers.Any(marker => model.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    protected override bool UseMaxCompletionTokens(string model)
+    {
+        return ReasoningModelMarkers.Any(marker => model.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    }
 
     public override IReadOnlyList<ProviderConfigField> ConfigFields { get; } =
     [
@@ -46,8 +48,10 @@ public sealed class AzureAiProvider(HttpClient httpClient, AIProviderConfigCache
         return uri.GetLeftPart(UriPartial.Authority) + V1Suffix;
     }
 
-    protected override void ApplyAuth(HttpRequestMessage request, string apiKey) =>
+    protected override void ApplyAuth(HttpRequestMessage request, string apiKey)
+    {
         request.Headers.TryAddWithoutValidation("api-key", apiKey);
+    }
 
     // Azure's /models lists base models, not the deployments you can actually call, so prefer the
     // user-declared deployment names and only fall back to /models when none are set.

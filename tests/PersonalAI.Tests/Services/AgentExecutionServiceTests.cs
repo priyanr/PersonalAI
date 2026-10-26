@@ -1,3 +1,4 @@
+using PersonalAI.Core.Services.Monitoring.Collectors;
 using System.Text.Json;
 using FluentAssertions;
 using PersonalAI.Core.Infrastructure;
@@ -23,31 +24,33 @@ public class AgentExecutionServiceTests
     private static AppDbContext NewContext() => new(
         new DbContextOptionsBuilder<AppDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
 
-    private static AgentExecutionService CreateService(
-        AppDbContext db, IAIProvider provider, ISkillExecutionService skillExecution,
+    internal static AgentExecutionService CreateService(
+        AppDbContext db, IAIProvider provider, FakeSkillProvider skillProvider,
         AgentSettings? agentSettings = null, ToolRegistry? tools = null, ISandboxHostClient? sandboxHostClient = null) => new(
+        db,
         new AgentsRepository(db),
         new AgentRunsRepository(db),
         new SkillsRepository(db),
-        skillExecution,
+        skillProvider.CreateService(db),
         new AIProviderRegistry([provider]),
         tools ?? new ToolRegistry([]),
         Options.Create(agentSettings ?? new AgentSettings { MaxIterations = 25 }),
         sandboxHostClient ?? Mock.Of<ISandboxHostClient>(),
-        Mock.Of<ILogger<AgentExecutionService>>());
+        TestAgentTypes.Registry,
+        Mock.Of<ILogger<AgentExecutionService>>(),
+        new DataSourceRegistry([]));
 
     [Fact]
     public async Task RunAsync_PlainTextReply_EndsWithDoneAndRecordsSucceededRun()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "You are helpful.", "ollama", "llama3.1:8b", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("All done", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -69,26 +72,24 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ToolCallForEnabledSkill_InvokesSkillExecutionWithInputArg()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skill = await skillsRepo.CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "Weather digest", "Summarizes the weather", "prompt", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skill.Id], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather_digest", """{"input":"today"}""")], true)],
             [new AiChatChunk("Sunny.", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("It's sunny."), new DoneEvent()]);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider("It's sunny.");
+        var service = CreateService(db, provider, skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
             events.Add(e);
 
-        skillExecution.Calls.Should().ContainSingle(c => c.SkillId == skill.Id && c.Input == "today");
+        skillProvider.Inputs.Should().Equal("today");
         events.OfType<ToolResultEvent>().Should().ContainSingle(e => !e.IsError && e.ResultContent == "It's sunny.");
         events.Should().ContainSingle(e => e is DoneEvent);
         provider.RecordedRequests.Should().HaveCount(2);
@@ -101,20 +102,18 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_MidRun_PersistsTranscriptProgressivelyRatherThanOnlyAtCompletion()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skill = await skillsRepo.CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "Weather digest", "Summarizes the weather", "prompt", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skill.Id], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather_digest", """{"input":"today"}""")], true)],
             [new AiChatChunk("Sunny.", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("It's sunny."), new DoneEvent()]);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider("It's sunny.");
+        var service = CreateService(db, provider, skillProvider);
         var runsRepo = new AgentRunsRepository(db);
 
         Guid runId = default;
@@ -144,26 +143,24 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ToolCallForNameNotAdvertised_RejectsWithoutInvokingAnySkill()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skill = await skillsRepo.CreateAsync("Weather", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "Weather", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
         // Agent has no enabled skills, even though "Weather" exists in the catalog.
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather", "{}")], true)],
             [new AiChatChunk("Understood", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new DoneEvent()]);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
             events.Add(e);
 
-        skillExecution.Calls.Should().BeEmpty();
+        skillProvider.Inputs.Should().BeEmpty();
         events.OfType<ToolResultEvent>().Should().ContainSingle(e => e.IsError && e.ResultContent!.Contains("not one of this agent's enabled skills or tools"));
         _ = skill; // only present to prove the skill's existence elsewhere doesn't make it callable here
     }
@@ -172,23 +169,22 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ToolCallForEnabledDirectTool_ExecutesToolDirectlyWithoutASkill()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], ["gmail"], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gmail", """{"action":"list_messages"}""")], true)],
             [new AiChatChunk("Checked.", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
+        var skillProvider = new FakeSkillProvider();
         var tools = new ToolRegistry([new FakeTool("gmail", (_, _) => new ToolCompleted("2 unread"))]);
-        var service = CreateService(db, provider, skillExecution, tools: tools);
+        var service = CreateService(db, provider, skillProvider, tools: tools);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
             events.Add(e);
 
-        skillExecution.Calls.Should().BeEmpty();
+        skillProvider.Inputs.Should().BeEmpty();
         events.OfType<ToolResultEvent>().Should().ContainSingle(e => !e.IsError && e.ResultContent == "2 unread");
         events.Should().ContainSingle(e => e is DoneEvent);
         provider.RecordedToolSets[0].Should().ContainSingle(t => t.Name == "gmail");
@@ -198,9 +194,8 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ToolCallForToolNotEnabledOnAgent_RejectsWithoutExecutingIt()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
         // "gmail" exists in the registry but isn't in this agent's EnabledTools.
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
@@ -208,9 +203,9 @@ public class AgentExecutionServiceTests
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "gmail", "{}")], true)],
             [new AiChatChunk("Understood", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
+        var skillProvider = new FakeSkillProvider();
         var tools = new ToolRegistry([new FakeTool("gmail", (_, _) => { executed = true; return new ToolCompleted("should not run"); })]);
-        var service = CreateService(db, provider, skillExecution, tools: tools);
+        var service = CreateService(db, provider, skillProvider, tools: tools);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -224,19 +219,18 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_DirectToolRequiresApproval_RejectsInsteadOfPausing()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], ["write_file"], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "write_file", "{}")], true)],
             [new AiChatChunk("Understood", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
+        var skillProvider = new FakeSkillProvider();
         var tools = new ToolRegistry([
             new FakeTool("write_file", (_, _) => new ToolApprovalRequired("outside workspace", "/outside/path"))
         ]);
-        var service = CreateService(db, provider, skillExecution, tools: tools);
+        var service = CreateService(db, provider, skillProvider, tools: tools);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -249,11 +243,9 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ExceedsMaxIterations_EmitsErrorAndRecordsFailedRun()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skill = await skillsRepo.CreateAsync("Loop", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "Loop", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skill.Id], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
@@ -261,8 +253,8 @@ public class AgentExecutionServiceTests
             .Select(_ => (IReadOnlyList<AiChatChunk>)[new AiChatChunk("", [new AiToolCall("call1", "skill_loop", "{}")], true)])
             .ToArray();
         var provider = new FakeAIProvider(responses);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("still going"), new DoneEvent()]);
-        var service = CreateService(db, provider, skillExecution, new AgentSettings { MaxIterations = 3 });
+        var skillProvider = new FakeSkillProvider("still going");
+        var service = CreateService(db, provider, skillProvider, new AgentSettings { MaxIterations = 3 });
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -278,12 +270,10 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_AgentMaxLlmCallsSet_OverridesGlobalDefaultAndCapsAtThatMany()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skill = await skillsRepo.CreateAsync("Loop", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
+        var skill = await TestSeed.SkillAsync(db, "Loop", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
         // Global default is 25, but this agent's own MaxLlmCalls of 2 should win.
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skill.Id], [], 2,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
@@ -291,8 +281,8 @@ public class AgentExecutionServiceTests
             .Select(_ => (IReadOnlyList<AiChatChunk>)[new AiChatChunk("", [new AiToolCall("call1", "skill_loop", "{}")], true)])
             .ToArray();
         var provider = new FakeAIProvider(responses);
-        var skillExecution = new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("still going"), new DoneEvent()]);
-        var service = CreateService(db, provider, skillExecution, new AgentSettings { MaxIterations = 25 });
+        var skillProvider = new FakeSkillProvider("still going");
+        var service = CreateService(db, provider, skillProvider, new AgentSettings { MaxIterations = 25 });
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -306,14 +296,13 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_EachCall_RelaysIncreasingCallBudgetToTheModel()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "You are helpful.", "ollama", "m", null, [], [], 5,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("All done", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         await foreach (var _ in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None)) { }
 
@@ -326,14 +315,13 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ProviderThrows_EmitsErrorAndRecordsFailedRunWithoutCrashing()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new ThrowingAIProvider();
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -349,18 +337,16 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_TwoSkillsWithCollidingSlugs_GetDistinctToolNames()
     {
         await using var db = NewContext();
-        var skillsRepo = new SkillsRepository(db);
-        var skillA = await skillsRepo.CreateAsync("Weather!!!", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
-        var skillB = await skillsRepo.CreateAsync("Weather???", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
+        var skillA = await TestSeed.SkillAsync(db, "Weather!!!", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
+        var skillB = await TestSeed.SkillAsync(db, "Weather???", null, "p", "ollama", "m", null, [], [], CancellationToken.None);
 
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skillA.Id, skillB.Id], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("done", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         await foreach (var _ in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None)) { }
 
@@ -373,22 +359,145 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_AfterSuccess_RecomputesAgentNextRunAtForIntervalSchedule()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Interval, null, 30, null, true, CancellationToken.None);
         var originalNextRunAt = agent.NextRunAt;
 
         var provider = new FakeAIProvider([new AiChatChunk("done", null, true)]);
-        var skillExecution = new FakeSkillExecutionService((_, _) => []);
-        var service = CreateService(db, provider, skillExecution);
+        var skillProvider = new FakeSkillProvider();
+        var service = CreateService(db, provider, skillProvider);
 
         await foreach (var _ in service.RunAsync(agent.Id, AgentRunTrigger.Scheduled, CancellationToken.None)) { }
 
-        var fetched = await agentsRepo.GetAsync(agent.Id, CancellationToken.None);
+        var fetched = await new AgentsRepository(db).GetAsync(agent.Id, CancellationToken.None);
         fetched!.LastRunAt.Should().NotBeNull();
         fetched.NextRunAt.Should().NotBeNull();
         fetched.NextRunAt.Should().NotBe(originalNextRunAt); // re-armed from the run's completion time
+    }
+
+    [Fact]
+    public async Task ContinueAsync_SendsTranscriptAsHistory_AppendsReplyAndLeavesScheduleAlone()
+    {
+        await using var db = NewContext();
+        var agent = await TestSeed.AgentAsync(db, 
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Interval, null, 30, null, true, CancellationToken.None);
+
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)], [new AiChatChunk("added it", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillProvider());
+
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+        var scheduleAfterRun = (await new AgentsRepository(db).GetAsync(agent.Id, CancellationToken.None))!.NextRunAt;
+
+        var events = new List<AgentStreamEvent>();
+        await foreach (var e in service.ContinueAsync(agent.Id, runId, "please add the disk widget", CancellationToken.None))
+            events.Add(e);
+
+        events.Should().ContainSingle(e => e is DoneEvent);
+        var sent = provider.RecordedRequests[1];
+        // The recorded list is the live one, so it also holds the reply appended after the call.
+        sent.Select(m => (m.Role, m.Content)).Should().Equal(
+            ("system", sent[0].Content), ("user", "Run this agent."), ("assistant", "first answer"),
+            ("user", "please add the disk widget"), ("assistant", "added it"));
+        sent[0].Content.Should().Contain("[Follow-up]");
+
+        var run = await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(AgentRunStatus.Succeeded);
+        var transcript = JsonSerializer.Deserialize<List<AgentRunTranscriptEntry>>(run.TranscriptJson)!;
+        transcript.Select(t => (t.Kind, t.Content)).Should().Equal(
+            ("text", "first answer"), ("user", "please add the disk widget"), ("text", "added it"));
+
+        (await new AgentsRepository(db).GetAsync(agent.Id, CancellationToken.None))!.NextRunAt.Should().Be(scheduleAfterRun);
+    }
+
+    [Fact]
+    public async Task ContinueAsync_KeepsTheRunsOriginalStatusSummaryAndCompletionTime_EvenWhenTheFollowUpFails()
+    {
+        await using var db = NewContext();
+        var agent = await TestSeed.AgentAsync(db, 
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)]) { };
+        var service = CreateService(db, provider, new FakeSkillProvider());
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+        var original = (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!;
+        var (status, summary, completedAt) = (original.Status, original.Summary, original.CompletedAt);
+
+        provider.ThrowOnNextCall = new InvalidOperationException("the model is down");
+        var events = new List<AgentStreamEvent>();
+        await foreach (var e in service.ContinueAsync(agent.Id, runId, "please add a widget", CancellationToken.None)) events.Add(e);
+
+        events.Should().ContainSingle(e => e is ErrorEvent);
+        var run = (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!;
+        run.Status.Should().Be(status).And.Be(AgentRunStatus.Succeeded);
+        run.Summary.Should().Be(summary);
+        run.CompletedAt.Should().Be(completedAt);
+        var transcript = JsonSerializer.Deserialize<List<AgentRunTranscriptEntry>>(run.TranscriptJson)!;
+        transcript.Select(t => t.Kind).Should().Equal("text", "user", "text");
+        transcript[^1].IsError.Should().BeTrue();
+        transcript[^1].Content.Should().Contain("the model is down");
+    }
+
+    [Fact]
+    public async Task ContinueAsync_ASuccessfulFollowUp_LeavesTheOriginalSummaryInPlace()
+    {
+        await using var db = NewContext();
+        var agent = await TestSeed.AgentAsync(db, 
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first answer", null, true)], [new AiChatChunk("added it", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillProvider());
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+
+        await foreach (var _ in service.ContinueAsync(agent.Id, runId, "more", CancellationToken.None)) { }
+
+        (await new AgentRunsRepository(db).GetAsync(runId, CancellationToken.None))!.Summary.Should().Be("first answer");
+    }
+
+    [Fact]
+    public async Task ContinueAsync_TwoAtOnce_OnlyOneRuns()
+    {
+        await using var db = NewContext();
+        var agent = await TestSeed.AgentAsync(db, 
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var provider = new FakeAIProvider([new AiChatChunk("first", null, true)], [new AiChatChunk("second", null, true)]);
+        var service = CreateService(db, provider, new FakeSkillProvider());
+        var runId = Guid.Empty;
+        await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
+            if (e is AgentRunStartedEvent started) runId = started.RunId;
+
+        await using var first = service.ContinueAsync(agent.Id, runId, "one", CancellationToken.None).GetAsyncEnumerator();
+        (await first.MoveNextAsync()).Should().BeTrue(); // started: the run is claimed
+
+        var second = async () => { await foreach (var _ in service.ContinueAsync(agent.Id, runId, "two", CancellationToken.None)) { } };
+        await second.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still in progress*");
+        while (await first.MoveNextAsync()) { }
+
+        // released afterwards
+        await foreach (var _ in service.ContinueAsync(agent.Id, runId, "three", CancellationToken.None)) { }
+    }
+
+    [Fact]
+    public async Task ContinueAsync_RunStillRunning_IsRefused()
+    {
+        await using var db = NewContext();
+        var agent = await TestSeed.AgentAsync(db, 
+            "a", null, "orchestrate", "ollama", "m", null, [], [], null,
+            AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
+        var run = await TestSeed.RunAsync(db, agent.Id, AgentRunTrigger.Manual);
+        var service = CreateService(db, new FakeAIProvider(), new FakeSkillProvider());
+
+        var act = async () => { await foreach (var _ in service.ContinueAsync(agent.Id, run.Id, "hi", CancellationToken.None)) { } };
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still in progress*");
     }
 
     private sealed class FlakyAIProvider(int failures) : IAIProvider
@@ -419,11 +528,11 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_RecordsLlmCallCount_NotCountingNetworkRetries()
     {
         await using var db = NewContext();
-        var agent = await new AgentsRepository(db).CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
         var provider = new FlakyAIProvider(failures: 1);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []),
+        var service = CreateService(db, provider, new FakeSkillProvider(),
             new AgentSettings { ProviderRetryCount = 3, ProviderRetryDelaySeconds = 0 });
 
         var events = new List<AgentStreamEvent>();
@@ -439,15 +548,15 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_ProviderReportsUsage_AccumulatesTokenTotalsOnRunAndEmitsEvents()
     {
         await using var db = NewContext();
-        var skill = await new SkillsRepository(db).CreateAsync(
+        var skill = await TestSeed.SkillAsync(db, 
             "Weather digest", "Summarizes the weather", "prompt", "ollama", "m", null, [], [], CancellationToken.None);
-        var agent = await new AgentsRepository(db).CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [skill.Id], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
         var provider = new FakeAIProvider(
             [new AiChatChunk("", [new AiToolCall("call1", "skill_weather_digest", """{"input":"today"}""")], true, new AiTokenUsage(100, 20))],
             [new AiChatChunk("Sunny.", null, true, new AiTokenUsage(150, 30))]);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => [new TextDeltaEvent("It's sunny."), new DoneEvent()]));
+        var service = CreateService(db, provider, new FakeSkillProvider("It's sunny."));
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -465,11 +574,11 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_TransientNetworkErrorOnFirstAttempt_RetriesAndSucceeds()
     {
         await using var db = NewContext();
-        var agent = await new AgentsRepository(db).CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
         var provider = new FlakyAIProvider(failures: 3);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []),
+        var service = CreateService(db, provider, new FakeSkillProvider(),
             new AgentSettings { ProviderRetryCount = 3, ProviderRetryDelaySeconds = 0 });
 
         var events = new List<AgentStreamEvent>();
@@ -486,11 +595,11 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_TransientErrorPersists_FailsOnceRetriedWithFullErrorChain()
     {
         await using var db = NewContext();
-        var agent = await new AgentsRepository(db).CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "orchestrate", "ollama", "m", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
         var provider = new FlakyAIProvider(failures: 10);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []),
+        var service = CreateService(db, provider, new FakeSkillProvider(),
             new AgentSettings { ProviderRetryCount = 3, ProviderRetryDelaySeconds = 0 });
 
         var events = new List<AgentStreamEvent>();
@@ -534,13 +643,12 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_EmptyReplyAtOutputLimit_RecordsFailedRunWithTheReason()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "You are helpful.", "ollama", "llama3.1:8b", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk(null, null, true, new AiTokenUsage(10, 8192), HitOutputLimit: true)]);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var service = CreateService(db, provider, new FakeSkillProvider());
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -557,13 +665,12 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_AnswerCutOffAtOutputLimit_RecordsFailedRun()
     {
         await using var db = NewContext();
-        var agentsRepo = new AgentsRepository(db);
-        var agent = await agentsRepo.CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "You are helpful.", "ollama", "llama3.1:8b", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None);
 
         var provider = new FakeAIProvider([new AiChatChunk("Partial report", null, true, HitOutputLimit: true)]);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var service = CreateService(db, provider, new FakeSkillProvider());
 
         var events = new List<AgentStreamEvent>();
         await foreach (var e in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None))
@@ -578,12 +685,12 @@ public class AgentExecutionServiceTests
     public async Task RunAsync_PassesTheAgentsReasoningEffort()
     {
         await using var db = NewContext();
-        var agent = await new AgentsRepository(db).CreateAsync(
+        var agent = await TestSeed.AgentAsync(db, 
             "a", null, "You are helpful.", "ollama", "gpt-oss:20b", null, [], [], null,
             AgentScheduleKind.Manual, null, null, null, true, CancellationToken.None, reasoningEffort: "low");
 
         var provider = new FakeAIProvider([new AiChatChunk("All done", null, true)]);
-        var service = CreateService(db, provider, new FakeSkillExecutionService((_, _) => []));
+        var service = CreateService(db, provider, new FakeSkillProvider());
 
         await foreach (var _ in service.RunAsync(agent.Id, AgentRunTrigger.Manual, CancellationToken.None)) { }
 

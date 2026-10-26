@@ -16,7 +16,7 @@ namespace PersonalAI.Core.Services.AI.OpenAiCompatible;
 /// both OpenAiProvider and DeepSeekProvider (DeepSeek's API is OpenAI-compatible). Providers that also
 /// serve the Responses API (OpenAI, Azure) can send a model to /responses instead — see
 /// <see cref="SupportsResponsesApi"/>.</summary>
-public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProviderConfigCache configCache, IOptions<AgentSettings> agentSettings) : IAIProvider
+public abstract partial class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProviderConfigCache configCache, IOptions<AgentSettings> agentSettings) : IAIProvider
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -28,7 +28,10 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
     public abstract string DefaultBaseUrl { get; }
     public abstract IReadOnlyList<ProviderConfigField> ConfigFields { get; }
 
-    protected virtual bool UseMaxCompletionTokens(string model) => false;
+    protected virtual bool UseMaxCompletionTokens(string model)
+    {
+        return false;
+    }
 
     /// <summary>Lets a subclass map the chat loop's thinking switch onto a provider-specific request field.
     /// The default does nothing: standard OpenAI has no on/off switch for reasoning.</summary>
@@ -52,14 +55,6 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
     // "{providerKey}:{model}" → the output-limit parameter a 400 told us to use instead of the one we sent.
     private static readonly ConcurrentDictionary<string, string> LearnedOutputLimitParameters = new();
 
-    // "{providerKey}:{model}" pairs that refused function tools on /chat/completions with any reasoning_effort
-    // we could send, so go to /responses instead.
-    private static readonly ConcurrentDictionary<string, bool> ResponsesApiModels = new();
-
-    // "{providerKey}:{model}" pairs on /responses that rejected reasoning.summary (a model without reasoning, or
-    // an organization not verified for reasoning summaries), so it is left out.
-    private static readonly ConcurrentDictionary<string, bool> NoReasoningSummaryModels = new();
-
     // Phrases the various backends use when rejecting a request field they don't accept.
     private static readonly string[] UnsupportedParameterPhrases =
         ["unsupported", "not supported", "unrecognized", "unknown", "extra inputs", "not permitted", "not allowed"];
@@ -75,45 +70,39 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
             null, response.StatusCode);
     }
 
-    private static string Truncate(string body) => body.Length > 1000 ? body[..1000] : body;
+    private static string Truncate(string body)
+    {
+        return body.Length > 1000 ? body[..1000] : body;
+    }
 
-    private static bool IsToolsNeedNoReasoningError(string body) =>
-        body.Contains("reasoning_effort", StringComparison.Ordinal)
+    private static bool IsToolsNeedNoReasoningError(string body)
+    {
+        return body.Contains("reasoning_effort", StringComparison.Ordinal)
         && body.Contains("'none'", StringComparison.Ordinal);
+    }
 
-    /// <summary>Tools were refused along with a reasoning_effort we sent: either the model wants "none" and the user
-    /// (or the chat/agent) chose something else, or it rejected "none" itself. /chat/completions can't serve it with tools then, but
-    /// /responses can.</summary>
-    private bool ShouldSwitchToResponsesApi(OpenAiChatRequestWire requestBody, string errorBody, string model) =>
-        SupportsResponsesApi
-        && requestBody.Tools is not null
-        && requestBody.ReasoningEffort is not null
-        && IsToolsNeedNoReasoningError(errorBody)
-        && configCache.GetModelValue(Key, model, ModelSettings.ApiField) is null;
 
     /// <summary>The caller's reasoning effort (a chat's or agent's own choice), else the model's pinned
     /// ReasoningEffort, else null — send nothing and let the model use its default.</summary>
-    private string? ResolveReasoningEffort(string model, string? reasoningEffort) =>
-        (reasoningEffort ?? configCache.GetModelValue(Key, model, ModelSettings.ReasoningEffortField))?.ToLowerInvariant();
+    private string? ResolveReasoningEffort(string model, string? reasoningEffort)
+    {
+        return (reasoningEffort ?? configCache.GetModelValue(Key, model, ModelSettings.ReasoningEffortField))?.ToLowerInvariant();
+    }
 
-    private bool UsesResponsesApi(string model, string modelKey) =>
-        SupportsResponsesApi
-        && configCache.GetModelValue(Key, model, ModelSettings.ApiField)?.ToLowerInvariant() switch
-        {
-            ModelSettings.ResponsesApi => true,
-            ModelSettings.ChatCompletionsApi => false,
-            _ => ResponsesApiModels.ContainsKey(modelKey)
-        };
 
     /// <summary>A 400 rejecting <paramref name="parameter"/> itself (not, say, its value being too large).</summary>
-    private static bool IsUnsupportedParameterError(string body, string parameter) =>
-        body.Contains(parameter, StringComparison.Ordinal)
+    private static bool IsUnsupportedParameterError(string body, string parameter)
+    {
+        return body.Contains(parameter, StringComparison.Ordinal)
         && UnsupportedParameterPhrases.Any(p => body.Contains(p, StringComparison.OrdinalIgnoreCase));
+    }
 
-    private string ResolveOutputLimitParameter(string model, string modelKey) =>
-        configCache.GetModelValue(Key, model, ModelSettings.OutputLimitParameterField)?.ToLowerInvariant()
+    private string ResolveOutputLimitParameter(string model, string modelKey)
+    {
+        return configCache.GetModelValue(Key, model, ModelSettings.OutputLimitParameterField)?.ToLowerInvariant()
         ?? (LearnedOutputLimitParameters.TryGetValue(modelKey, out var learned) ? learned : null)
         ?? (UseMaxCompletionTokens(model) ? ModelSettings.MaxCompletionTokensParameter : ModelSettings.MaxTokensParameter);
+    }
 
     private static void ApplyOutputLimit(OpenAiChatRequestWire requestBody, string parameter, int maxOutputTokens)
     {
@@ -156,8 +145,10 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
     }
 
     private Task<HttpResponseMessage> SendChatRequestAsync(
-        string baseUrl, string? apiKey, OpenAiChatRequestWire requestBody, CancellationToken ct) =>
-        PostStreamingAsync($"{baseUrl}/chat/completions", apiKey, JsonSerializer.Serialize(requestBody, JsonOptions), ct);
+        string baseUrl, string? apiKey, OpenAiChatRequestWire requestBody, CancellationToken ct)
+    {
+        return PostStreamingAsync($"{baseUrl}/chat/completions", apiKey, JsonSerializer.Serialize(requestBody, JsonOptions), ct);
+    }
 
     private async Task<HttpResponseMessage> PostStreamingAsync(string url, string? apiKey, string json, CancellationToken ct)
     {
@@ -170,14 +161,23 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
         return await httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
-    protected (string BaseUrl, string? ApiKey) ResolveConnection() => (
-        NormalizeBaseUrl((configCache.GetValue(Key, "BaseUrl") is { Length: > 0 } url ? url : DefaultBaseUrl).TrimEnd('/')),
-        configCache.GetValue(Key, "ApiKey"));
+    protected (string BaseUrl, string? ApiKey) ResolveConnection()
+    {
+        return (
+            NormalizeBaseUrl((configCache.GetValue(Key, "BaseUrl") is { Length: > 0 } url ? url : DefaultBaseUrl).TrimEnd('/')),
+            configCache.GetValue(Key, "ApiKey"));
+    }
 
-    protected string? GetConfigValue(string field) => configCache.GetValue(Key, field);
+    protected string? GetConfigValue(string field)
+    {
+        return configCache.GetValue(Key, field);
+    }
 
     /// <summary>Lets a subclass fix up a user-entered base URL (e.g. append a path suffix).</summary>
-    protected virtual string NormalizeBaseUrl(string baseUrl) => baseUrl;
+    protected virtual string NormalizeBaseUrl(string baseUrl)
+    {
+        return baseUrl;
+    }
 
     /// <summary>Attaches credentials to an outgoing request. Default is OpenAI-style bearer auth.</summary>
     protected virtual void ApplyAuth(HttpRequestMessage request, string apiKey)
@@ -351,147 +351,6 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
         }
     }
 
-    private async IAsyncEnumerable<AiChatChunk> ResponsesStreamAsync(
-        string baseUrl, string? apiKey, string model, string modelKey,
-        IReadOnlyList<AiChatMessage> messages, IReadOnlyList<AiToolDefinition> tools, int maxOutputTokens, string? effort,
-        [EnumeratorCancellation] CancellationToken ct)
-    {
-        var summary = effort == "none" || NoReasoningSummaryModels.ContainsKey(modelKey) ? null : "auto";
-        var requestBody = new OpenAiResponsesRequestWire
-        {
-            Model = model,
-            Stream = true,
-            Store = false,
-            Input = [.. messages.SelectMany(ToResponsesInputItems)],
-            Tools = tools.Count == 0 || configCache.ToolsDisabled(Key, model) ? null : [.. tools.Select(ToResponsesTool)],
-            MaxOutputTokens = ResolveOutputLimitParameter(model, modelKey) == ModelSettings.OmitParameter ? null : maxOutputTokens,
-            Reasoning = effort is null && summary is null
-                ? null
-                : new OpenAiResponsesReasoningWire { Effort = effort, Summary = summary }
-        };
-
-        var url = $"{baseUrl}/responses";
-        var response = await PostStreamingAsync(url, apiKey, JsonSerializer.Serialize(requestBody, JsonOptions), ct);
-        if (response.StatusCode == HttpStatusCode.BadRequest && requestBody.Reasoning?.Summary is not null)
-        {
-            // Reasoning summaries are an extra we ask for, not something the chat needs: a model without reasoning,
-            // or an organization not verified for summaries, refuses them — so retry without and remember.
-            var errorBody = await response.Content.ReadAsStringAsync(ct);
-            response.Dispose();
-            var summaryRefused = errorBody.Contains("reasoning", StringComparison.OrdinalIgnoreCase)
-                && (requestBody.Reasoning.Effort is null || errorBody.Contains("summar", StringComparison.OrdinalIgnoreCase));
-            if (!summaryRefused)
-                throw new HttpRequestException(
-                    $"Response status code does not indicate success: 400 (Bad Request). {Truncate(errorBody)}",
-                    null, HttpStatusCode.BadRequest);
-
-            NoReasoningSummaryModels[modelKey] = true;
-            requestBody.Reasoning = requestBody.Reasoning.Effort is null
-                ? null
-                : new OpenAiResponsesReasoningWire { Effort = requestBody.Reasoning.Effort };
-            response = await PostStreamingAsync(url, apiKey, JsonSerializer.Serialize(requestBody, JsonOptions), ct);
-        }
-
-        using var _ = response;
-        await EnsureSuccessWithBodyAsync(response, ct);
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        using var reader = new StreamReader(stream);
-
-        // Keyed by output_index so the calls come out in the order the model made them.
-        var toolCalls = new SortedDictionary<int, OpenAiResponsesOutputItemWire>();
-        AiTokenUsage? usage = null;
-        var hitOutputLimit = false;
-
-        string? line;
-        while ((line = await reader.ReadLineAsync(ct)) is not null)
-        {
-            if (!line.StartsWith("data:", StringComparison.Ordinal)) continue;
-
-            var payload = line["data:".Length..].Trim();
-            if (payload == "[DONE]") break;
-            if (payload.Length == 0) continue;
-
-            OpenAiResponsesEventWire? evt;
-            try
-            {
-                evt = JsonSerializer.Deserialize<OpenAiResponsesEventWire>(payload, JsonOptions);
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
-
-            switch (evt?.Type)
-            {
-                case "response.output_text.delta" when evt.DeltaText is { Length: > 0 } text:
-                    yield return new AiChatChunk(text, null, false);
-                    break;
-
-                // Summaries of hidden reasoning (OpenAI models), or raw reasoning text (open-weight models).
-                case "response.reasoning_summary_text.delta" or "response.reasoning_text.delta"
-                    when evt.DeltaText is { Length: > 0 } reasoning:
-                    yield return new AiChatChunk(null, null, false, ReasoningDelta: reasoning);
-                    break;
-
-                case "response.reasoning_summary_part.added" when evt.SummaryIndex > 0:
-                    yield return new AiChatChunk(null, null, false, ReasoningDelta: "\n\n");
-                    break;
-
-                // The finished item carries the complete arguments, so the function_call_arguments.delta
-                // fragments needn't be stitched together.
-                case "response.output_item.done" when evt.Item is { Type: "function_call" } item:
-                    toolCalls[evt.OutputIndex] = item;
-                    break;
-
-                case "response.completed" or "response.incomplete":
-                    if (evt.Response?.Usage is { } u)
-                        usage = new AiTokenUsage(u.InputTokens, u.OutputTokens);
-                    if (evt.Response?.IncompleteDetails?.Reason == "max_output_tokens")
-                        hitOutputLimit = true;
-                    break;
-
-                case "response.failed":
-                    throw new HttpRequestException($"The model failed to respond: {evt.Response?.Error?.Message ?? "unknown error"}");
-
-                case "error":
-                    throw new HttpRequestException($"The model failed to respond: {evt.Message ?? payload}");
-            }
-        }
-
-        var finalToolCalls = toolCalls.Values
-            .Select(item => new AiToolCall(
-                item.CallId ?? Guid.NewGuid().ToString("N"),
-                item.Name ?? "",
-                // As on /chat/completions: blank means "no arguments" unless the output cap cut the call off.
-                !string.IsNullOrEmpty(item.Arguments) ? item.Arguments : hitOutputLimit ? "" : "{}"))
-            .ToList();
-        yield return new AiChatChunk(null, finalToolCalls.Count > 0 ? finalToolCalls : null, true, usage, HitOutputLimit: hitOutputLimit);
-    }
-
-    /// <summary>A chat message as Responses API input items: its text as a role message, plus a function_call item
-    /// per tool call an assistant message made; a tool result becomes a function_call_output.</summary>
-    private static IEnumerable<OpenAiResponsesInputItemWire> ToResponsesInputItems(AiChatMessage m)
-    {
-        if (m.Role == "tool")
-        {
-            yield return new OpenAiResponsesInputItemWire { Type = "function_call_output", CallId = m.ToolCallId ?? "", Output = m.Content ?? "" };
-            yield break;
-        }
-
-        if (m.Role != "assistant" || !string.IsNullOrEmpty(m.Content) || m.ToolCalls is not { Count: > 0 })
-            yield return new OpenAiResponsesInputItemWire { Role = m.Role, Content = m.Content ?? "" };
-
-        foreach (var tc in m.ToolCalls ?? [])
-            yield return new OpenAiResponsesInputItemWire { Type = "function_call", CallId = tc.ToolCallId, Name = tc.Name, Arguments = tc.WireArgumentsJson };
-    }
-
-    private static OpenAiResponsesToolWire ToResponsesTool(AiToolDefinition t) => new()
-    {
-        Name = t.Name,
-        Description = t.Description,
-        Parameters = JsonDocument.Parse(t.ParametersSchemaJson).RootElement.Clone()
-    };
 
     public virtual async Task<IReadOnlyList<AiModelInfo>> ListModelsAsync(CancellationToken ct)
     {
@@ -507,34 +366,42 @@ public abstract class OpenAiCompatibleProviderBase(HttpClient httpClient, AIProv
         return body?.Data?.Select(m => new AiModelInfo(m.Id, 0, null, null, null, null)).ToList() ?? [];
     }
 
-    public IAsyncEnumerable<AiPullProgress> PullModelStreamAsync(string modelName, CancellationToken ct) =>
+    public IAsyncEnumerable<AiPullProgress> PullModelStreamAsync(string modelName, CancellationToken ct)
+    {
         throw new NotSupportedException($"{DisplayName} does not support pulling local models.");
+    }
 
-    private static OpenAiMessageWire ToWireMessage(AiChatMessage m, bool sendReasoning) => new()
+    private static OpenAiMessageWire ToWireMessage(AiChatMessage m, bool sendReasoning)
     {
-        Role = m.Role,
-        Content = m.Content ?? "",
-        ToolCallId = m.Role == "tool" ? m.ToolCallId : null,
-        ReasoningContent = sendReasoning && m.Role == "assistant" && !string.IsNullOrEmpty(m.ReasoningContent) ? m.ReasoningContent : null,
-        ToolCalls = m.ToolCalls is { Count: > 0 }
-            ? [.. m.ToolCalls.Select(tc => new OpenAiToolCallWire
-            {
-                Id = tc.ToolCallId,
-                Function = new OpenAiFunctionCallWire { Name = tc.Name, Arguments = tc.WireArgumentsJson }
-            })]
-            : null
-    };
-
-    private static OpenAiToolWire ToWireTool(AiToolDefinition t) => new()
-    {
-        Type = "function",
-        Function = new OpenAiFunctionDefWire
+        return new()
         {
-            Name = t.Name,
-            Description = t.Description,
-            Parameters = JsonDocument.Parse(t.ParametersSchemaJson).RootElement.Clone()
-        }
-    };
+            Role = m.Role,
+            Content = m.Content ?? "",
+            ToolCallId = m.Role == "tool" ? m.ToolCallId : null,
+            ReasoningContent = sendReasoning && m.Role == "assistant" && !string.IsNullOrEmpty(m.ReasoningContent) ? m.ReasoningContent : null,
+            ToolCalls = m.ToolCalls is { Count: > 0 }
+                ? [.. m.ToolCalls.Select(tc => new OpenAiToolCallWire
+                {
+                    Id = tc.ToolCallId,
+                    Function = new OpenAiFunctionCallWire { Name = tc.Name, Arguments = tc.WireArgumentsJson }
+                })]
+                : null
+        };
+    }
+
+    private static OpenAiToolWire ToWireTool(AiToolDefinition t)
+    {
+        return new()
+        {
+            Type = "function",
+            Function = new OpenAiFunctionDefWire
+            {
+                Name = t.Name,
+                Description = t.Description,
+                Parameters = JsonDocument.Parse(t.ParametersSchemaJson).RootElement.Clone()
+            }
+        };
+    }
 
     private sealed class ToolCallAccumulator
     {

@@ -10,17 +10,9 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace PersonalAI.Core.Tools;
 
-/// <summary>Read-only Gmail access (list/read messages, mark read/unread, add/remove labels — never send or delete),
-/// gated on a per-deployment Google OAuth connection made via Settings > Tools. Unlike the workspace
-/// file tools, "not connected" is a plain ToolCompleted(IsError: true) — never ToolApprovalRequired,
-/// which is reserved for the workspace-sandbox escape-hatch flow (see ToolExecutionResult.cs).
-///
-/// Takes IServiceScopeFactory rather than IToolConfigRepository directly: this tool lives inside the
-/// singleton ToolRegistry, but IToolConfigRepository is Scoped (it wraps the Scoped AppDbContext) —
-/// capturing a Scoped instance into a Singleton is a captive-dependency bug that throws at startup
-/// under ASP.NET Core's Development-mode scope validation. A short-lived scope is created only when a
-/// DB write is actually needed (persisting a refreshed/cleared token); everything else reads synchronously
-/// from the singleton ToolConfigCache, same as every other tool.</summary>
+/// <summary>Gmail access through the Google account connected under Settings > Tools: list and read messages, mark
+/// read or unread, add or remove labels. It never sends or deletes. Config is read from ToolConfigCache; saving a
+/// refreshed token needs the scoped ToolConfigService, so a scope is opened only for that.</summary>
 public sealed class GmailTool(
     GmailOAuthClient oauthClient, ToolConfigCache configCache,
     IServiceScopeFactory scopeFactory, IHttpClientFactory httpClientFactory) : ITool
@@ -65,7 +57,10 @@ public sealed class GmailTool(
         new("Connect", "Google account", ToolSettingFieldType.Custom, Required: false, CustomComponentKey: "gmailOAuthConnect")
     ];
 
-    public bool IsConnected(ToolConfigCache cache) => !string.IsNullOrEmpty(cache.GetValue("gmail", "RefreshToken"));
+    public bool IsConnected(ToolConfigCache cache)
+    {
+        return !string.IsNullOrEmpty(cache.GetValue("gmail", "RefreshToken"));
+    }
 
     public async Task<ToolExecutionResult> ExecuteAsync(JsonElement arguments, ToolExecutionContext context, CancellationToken ct)
     {
@@ -155,9 +150,7 @@ public sealed class GmailTool(
     private async Task PersistToolConfigAsync(IReadOnlyDictionary<string, string?> updates, CancellationToken ct)
     {
         using var scope = scopeFactory.CreateScope();
-        var repo = scope.ServiceProvider.GetRequiredService<IToolConfigRepository>();
-        await repo.SetValuesAsync("gmail", updates, ct);
-        configCache.MergeTool("gmail", updates);
+        await scope.ServiceProvider.GetRequiredService<ToolConfigService>().SaveValues("gmail", updates, ct);
     }
 
     private const int MaxSnippetChars = 160;
@@ -392,11 +385,13 @@ public sealed class GmailTool(
         }
     }
 
-    private static bool? GetBoolArg(JsonElement e, string name) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
+    private static bool? GetBoolArg(JsonElement e, string name)
+    {
+        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) &&
         (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)
             ? v.GetBoolean()
             : null;
+    }
 
     private static async Task<JsonDocument> GetJsonAsync(HttpClient client, string url, string accessToken, CancellationToken ct)
     {
@@ -423,7 +418,10 @@ public sealed class GmailTool(
         return JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
     }
 
-    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "...";
+    private static string Truncate(string s, int max)
+    {
+        return s.Length <= max ? s : s[..max] + "...";
+    }
 
     private sealed class GmailApiException(string message) : Exception(message);
 }

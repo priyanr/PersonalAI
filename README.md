@@ -10,6 +10,7 @@ sits behind one ASP.NET Core API and one Next.js UI, and runs on your own machin
 - **11 built-in tools**: `web_search`, `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `http_request`, `gmail`, `network_scan`, `computer_control`, `sandbox`
 - **Docker sandbox**: one container per chat session or agent run, with a file browser, port forwarding, and downloads
 - **Skills and scheduled Agents**: reusable prompts, and cron/interval agents that orchestrate them
+- **Dashboard & Alerts agents**: an agent type that designs collection jobs for your servers (or other data sources), runs them on an interval with no model involved, and builds a live dashboard and alert rules from the data
 - **Secrets vault**: store API keys once and reference them from skills with no plaintext in prompts
 - **Long-conversation compaction**: old history is summarized instead of dropped
 - **Optional login** through any OAuth2 / OpenID Connect provider (Keycloak, Auth0, Okta, Entra ID, Authentik, ...)
@@ -34,6 +35,7 @@ sits behind one ASP.NET Core API and one Next.js UI, and runs on your own machin
 - [Quick start: Docker Compose](#quick-start-docker-compose)
 - [Quick start: dotnet run](#quick-start-dotnet-run)
 - [First steps in the UI](#first-steps-in-the-ui)
+- [Dashboard & Alerts agents](#dashboard--alerts-agents)
 - [Sandbox](#sandbox)
 - [Authentication](#authentication)
 - [Configuration](#configuration)
@@ -110,10 +112,54 @@ variables override `appsettings.json` with the `Section__Key` convention).
    approval.
 3. **Store secrets.** Put API keys in **Settings → Secrets** and reference them from Skills.
 4. **Create Skills and Agents.** A Skill is a reusable prompt plus a tool set. An Agent runs Skills on a
-   schedule (cron or interval) or on demand, with a full run history.
+   schedule (cron or interval) or on demand, with a full run history. Choose the agent type **General**
+   for that, or **Dashboard & Alerts** for monitoring (see [below](#dashboard--alerts-agents)).
 5. **Optional tools.** `http_request` only reaches URLs you allow-list (`HttpTool:AllowedUrls`). Gmail
    needs your own Google OAuth client, entered under **Settings → Tools**; that page shows the redirect URI
    to register with Google.
+
+## Dashboard & Alerts agents
+
+A **Dashboard & Alerts** agent watches things for you. You describe in its prompt what to monitor (for example
+"CPU, memory, disk and Kubernetes pods on my servers"). The model then explores your servers, designs
+**collection jobs**, and builds a **dashboard** and **alert rules** from what they collect. After that the platform
+runs everything on its own schedule, with no model involved, so it is cheap and predictable.
+
+```
+prompt ──▶ model explores with the SSH tool ──▶ proposes jobs (request + parser + dataset + interval)
+                                                        │  you approve the exact request
+                                                        ▼
+                  collected on each interval, no model ──▶ datasets ──▶ dashboard widgets + alert rules
+```
+
+**Set it up**
+
+1. Store an SSH key or password in **Settings → Secrets**. Its name must start with `SSH_` (other secrets can
+   never be sent to a server).
+2. Under **Settings → Tools → SSH**, add your servers (grouped), test the connection (the host key is pinned on first
+   use), and review the **allowed commands** list.
+3. Create an agent, pick the type **Dashboard & Alerts**, choose its **Data sources**, and write the prompt. A starting
+   prompt for Linux servers is in [docs/DASHBOARD_AGENTS.md](docs/DASHBOARD_AGENTS.md#example-prompt-a-linux-server).
+4. **Run** the agent. Open its **Collection** panel and **approve** the jobs it proposes, then press *Run all jobs now*.
+   The dashboard and alerts fill in; the **chat on a run's page** lets you ask the agent for changes ("add the disk
+   temperature to the dashboard").
+
+**Alerts** are evaluated after every collection pass and clear on their own when the condition stops holding. You can
+**acknowledge** an alert (or all of them, with undo) to mark it as seen: the **Alerts** page groups *Needs attention*,
+*Acknowledged* and *Resolved*, and the menu badge counts only what still needs attention. A built-in
+`data_source_status` dataset records whether each connection could be reached, so "server down" is just another rule.
+
+**Safety**
+
+- The model never gets a shell. It proposes requests; a code-level guard allows only read-only commands from the
+  allowed list (plus a few stdin-only filters like `grep`/`cut`), and refuses chaining, redirects and substitution.
+- A command that is merely **not on the list** can still be proposed, but always waits for your approval and then runs
+  exactly as you saw it. Approval is bound to the job's content: if the model changes it afterwards, you must review again.
+- Credentials stay in the vault; the model only ever sees server names. Restrict the SSH account on the server too
+  (a read-only user) if you need a hard guarantee.
+
+SSH is the first data source; the job runner, dashboards and alerts are generic, so other sources (a database, an API)
+can be added as tools. Design, API and hardening notes: [docs/DASHBOARD_AGENTS.md](docs/DASHBOARD_AGENTS.md).
 
 ## Sandbox
 
@@ -364,6 +410,7 @@ A few sandbox tests need symlink support and are skipped automatically where it 
 | [docs/CONCEPTS.md](docs/CONCEPTS.md) | Agentic loop, tools, skills, agents, secrets, auth, SSE protocol |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every config section, model settings, database schema |
 | [docs/API.md](docs/API.md) | REST/SSE endpoint reference |
+| [docs/DASHBOARD_AGENTS.md](docs/DASHBOARD_AGENTS.md) | Dashboard & Alerts agents: collection jobs, data sources, dashboards, alerts, safety model |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Docker Compose, `dotnet run`, publishing, remote sandbox host |
 | [docs/SANDBOX_ARCHITECTURE.md](docs/SANDBOX_ARCHITECTURE.md) | Sandbox broker design, lifecycle, security |
 | [docs/COMPACTION_ARCHITECTURE.md](docs/COMPACTION_ARCHITECTURE.md) | Long-conversation history compaction |

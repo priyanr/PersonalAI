@@ -26,9 +26,16 @@ public sealed class ToolRegistry
     public IReadOnlyList<AiToolDefinition> Definitions =>
         [.. _tools.Values.Select(t => new AiToolDefinition(t.Name, t.Description, t.ParametersSchemaJson))];
 
+    /// <summary>The tools offered in chat and to skills: everything except tools that only work inside an agent run.</summary>
+    public IReadOnlyList<AiToolDefinition> ChatDefinitions =>
+        [.. _tools.Values.Where(t => !t.RequiresAgentRun).Select(t => new AiToolDefinition(t.Name, t.Description, t.ParametersSchemaJson))];
+
     public IReadOnlyList<ITool> All => [.. _tools.Values];
 
-    public bool TryGet(string name, out ITool tool) => _tools.TryGetValue(name, out tool!);
+    public bool TryGet(string name, out ITool tool)
+    {
+        return _tools.TryGetValue(name, out tool!);
+    }
 
     public static ToolRegistry CreateDefault(
         Workspace workspace, ISearchProvider searchProvider, AppSettingsCache appSettings,
@@ -38,7 +45,10 @@ public sealed class ToolRegistry
         IMouseInputService mouseInputService, IKeyboardInputService keyboardInputService,
         IScreenCaptureService screenCaptureService, IUiaElementScanner uiaElementScanner,
         ISandboxHostClient sandboxHostClient, IOptions<SandboxSettings> sandboxSettings,
-        ISandboxHostPowerSignaler sandboxHostPowerSignaler, TimeProvider timeProvider) => new(
+        ISandboxHostPowerSignaler sandboxHostPowerSignaler, TimeProvider timeProvider,
+        IEnumerable<ITool>? additionalTools = null)
+    {
+        return new(
     [
         new WebSearchTool(searchProvider, appSettings),
         new ReadFileTool(workspace),
@@ -51,5 +61,7 @@ public sealed class ToolRegistry
         new GmailTool(gmailOAuthClient, toolConfigCache, serviceScopeFactory, httpClientFactory),
         new ComputerControlTool(mouseInputService, keyboardInputService, screenCaptureService, uiaElementScanner),
         new SandboxTool(sandboxHostClient, sandboxSettings, toolConfigCache, serviceScopeFactory, sandboxHostPowerSignaler, timeProvider),
+        .. additionalTools ?? []
     ]);
+    }
 }

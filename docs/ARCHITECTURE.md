@@ -24,8 +24,8 @@
 │  │  SkillExecutionService / AgentExecutionService (unattended loops)│    │
 │  │  AIProviderRegistry → IAIProvider (Ollama / OpenAI / DeepSeek)   │    │
 │  │  ToolRegistry → 11 built-in tools                                │    │
-│  │  SecretsCache / ToolConfigCache / AIProviderConfigCache          │    │
-│  │  Repositories (EF Core / SQLite) for every entity below          │    │
+│  │  AppSettingsCache / ToolConfigCache / AIProviderConfigCache      │    │
+│  │  Feature services (writes) + read-only repositories (EF Core)    │    │
 │  │  SearXngSearchProvider · OAuthClient (delegated login)            │    │
 │  │  SandboxHostRegistry (ISandboxHostClient, owns the one WebSocket)│    │
 │  └───┬──────────┬────────────┬───────────────────────┬───────┬──────┘    │
@@ -71,8 +71,8 @@ PersonalAI.slnx                     # Solution file
 │   │
 │   └── PersonalAI.Core/              # Domain + infrastructure (no web deps)
 │       ├── Infrastructure/            # EF Core DbContext, configurations, migrations
-│       ├── Interfaces/                # Service contracts (IChatAgentService, IAIProvider,
-│       │                              # ISkillExecutionService, IAgentExecutionService, etc.)
+│       ├── Interfaces/                # Boundaries with several implementations or faked in tests:
+│       │                              # IAIProvider, IDataSource, ISandboxHostClient, ISearchProvider, ISshRunner
 │       ├── Models/
 │       │   ├── DTOs/                  # API-level request/response records
 │       │   ├── Entities/              # EF entities (+ Enums/ for status/trigger/schedule enums)
@@ -81,15 +81,15 @@ PersonalAI.slnx                     # Solution file
 │       │   ├── AI/                    # AIProviderRegistry, AIProviderConfigCache/Repository,
 │       │   │                          # Ollama/ and OpenAiCompatible/ (OpenAI + DeepSeek) providers
 │       │   ├── Agent/                 # ChatAgentService (per-session agentic loop), stream events
-│       │   ├── Agents/                # AgentExecutionService, AgentsRepository, AgentRunsRepository
+│       │   ├── Agents/                # AgentsService, AgentExecutionService, AgentsRepository, AgentRunsRepository
 │       │   ├── Auth/                  # OAuthClient + OAuthEndpointResolver (standard OAuth2/OIDC login)
 │       │   ├── Scheduling/            # CronExpression, ScheduleCalculator (dependency-free scheduler)
 │       │   ├── Search/                # SearXngSearchProvider
-│       │   ├── Secrets/               # SecretsCache, SecretsRepository
-│       │   ├── Sessions/              # ChatSessionRepository
-│       │   ├── Settings/              # AppSettingsRepository + AppSettingsCache
-│       │   ├── Skills/                # SkillExecutionService, SkillsRepository, SecretSubstitution
-│       │   └── Tools/                 # ToolConfigCache/Repository, Gmail/ (OAuth client, token store)
+│       │   ├── Secrets/               # SecretsService, SecretsRepository
+│       │   ├── Sessions/              # ChatSessionsService, ChatSessionRepository
+│       │   ├── Settings/              # AppSettingsService, AppSettingsRepository, AppSettingsCache
+│       │   ├── Skills/                # SkillsService, SkillExecutionService, SkillsRepository, SecretSubstitution
+│       │   └── Tools/                 # ToolConfigService, ToolConfigCache/Repository, Gmail/ (OAuth client, token store)
 │       ├── Services/Sandbox/          # SandboxHostRegistry (ISandboxHostClient), SandboxReconciler,
 │       │                              # SandboxRepository, BoundedOutputAccumulator
 │       └── Tools/                     # ITool interface, ToolRegistry, 11 built-in tools
@@ -168,7 +168,9 @@ PersonalAI.slnx                     # Solution file
 
 **SandboxHostRegistry**: Owns the one outbound WebSocket to `PersonalAI.SandboxHost`, multiplexes all sandbox I/O, tracks broker connection state.
 
-**Repositories & Caches**: EF Core repositories backed by SQLite; in-memory caches for secrets, tool config, and AI provider config (reloaded on every write, no TTL).
+**Services, repositories and caches**: each feature has one concrete service (e.g. `SecretsService`, `AgentsService`, `ChatSessionsService`, `CollectionJobService`) that validates input and writes through `AppDbContext`; controllers call one service method per action. Repositories only read (named queries, `AsNoTracking` for display). In-memory caches exist only where singletons (tools, providers) must read config synchronously: app settings, tool config and AI provider config, updated by the service that saves them.
+
+**Errors**: services throw `InvalidRequestException` (400), `NotFoundException` (404), `ConflictException` (409) or `UpstreamUnavailableException` (503) from `Models/RequestExceptions.cs`; `ApiExceptionHandler` turns them into the `{ message }` body the web client reads. SSE endpoints that have already started streaming send failures as an SSE error event instead.
 
 ---
 

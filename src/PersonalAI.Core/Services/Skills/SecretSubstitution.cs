@@ -49,6 +49,8 @@ public static partial class SecretSubstitution
         return value;
     }
 
-    private static string ReplacePlaceholders(string input, IReadOnlyDictionary<string, string> secrets) =>
-        PlaceholderPattern().Replace(input, m => secrets.TryGetValue(m.Groups[1].Value, out var v) ? v : m.Value);
+    private static string ReplacePlaceholders(string input, IReadOnlyDictionary<string, string> secrets)
+    {
+        return PlaceholderPattern().Replace(input, m => secrets.TryGetValue(m.Groups[1].Value, out var v) ? v : m.Value);
+    }
 }

@@ -18,26 +18,13 @@ public class ChatSessionRepositoryTests
     }
 
     [Fact]
-    public async Task CreateSessionAsync_ThenGetSessionsAsync_ReturnsCreatedSession()
-    {
-        await using var db = NewContext();
-        var repo = new ChatSessionRepository(db);
-
-        var session = await repo.CreateSessionAsync("My Chat", "llama3.1:8b", CancellationToken.None);
-        var (sessions, total) = await repo.GetSessionsAsync(null, 1, 20, CancellationToken.None);
-
-        sessions.Should().ContainSingle(s => s.Id == session.Id && s.Title == "My Chat" && s.ModelName == "llama3.1:8b");
-        total.Should().Be(1);
-    }
-
-    [Fact]
     public async Task GetSessionsAsync_FiltersByTitleCaseInsensitively()
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var match = await repo.CreateSessionAsync("Docker networking help", "llama3.1:8b", CancellationToken.None);
-        await repo.CreateSessionAsync("Recipe ideas", "llama3.1:8b", CancellationToken.None);
-        await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var match = await TestSeed.SessionAsync(db, "Docker networking help", "llama3.1:8b", CancellationToken.None);
+        await TestSeed.SessionAsync(db, "Recipe ideas", "llama3.1:8b", CancellationToken.None);
+        await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         var (sessions, total) = await repo.GetSessionsAsync("  DOCKER ", 1, 20, CancellationToken.None);
 
@@ -53,7 +40,7 @@ public class ChatSessionRepositoryTests
         var baseTime = DateTimeOffset.UtcNow;
         for (var i = 0; i < 5; i++)
         {
-            var s = await repo.CreateSessionAsync($"Chat {i}", "llama3.1:8b", CancellationToken.None);
+            var s = await TestSeed.SessionAsync(db, $"Chat {i}", "llama3.1:8b", CancellationToken.None);
             s.UpdatedAt = baseTime.AddMinutes(i);
         }
         await db.SaveChangesAsync();
@@ -67,50 +54,18 @@ public class ChatSessionRepositoryTests
     }
 
     [Fact]
-    public async Task SetSessionTitleAsync_UpdatesTitle_AndReturnsNullForUnknownSession()
-    {
-        await using var db = NewContext();
-        var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync("Old", "llama3.1:8b", CancellationToken.None);
-
-        var renamed = await repo.SetSessionTitleAsync(session.Id, "New", CancellationToken.None);
-        var missing = await repo.SetSessionTitleAsync(Guid.NewGuid(), "New", CancellationToken.None);
-
-        renamed!.Title.Should().Be("New");
-        missing.Should().BeNull();
-    }
-
-    [Fact]
-    public async Task AppendMessageAsync_AssignsSequentialSequenceNumbers()
-    {
-        await using var db = NewContext();
-        var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-
-        var m1 = await repo.AppendMessageAsync(new ChatMessage { SessionId = session.Id, Role = MessageRole.User, Content = "hi" }, CancellationToken.None);
-        var m2 = await repo.AppendMessageAsync(new ChatMessage { SessionId = session.Id, Role = MessageRole.Assistant, Content = "hello" }, CancellationToken.None);
-        var m3 = await repo.AppendMessageAsync(new ChatMessage { SessionId = session.Id, Role = MessageRole.User, Content = "thanks" }, CancellationToken.None);
-
-        m1.SequenceNumber.Should().Be(1);
-        m2.SequenceNumber.Should().Be(2);
-        m3.SequenceNumber.Should().Be(3);
-    }
-
-    [Fact]
     public async Task GetMessagesAsync_ReturnsMessagesOrderedBySequenceNumber()
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-
-        await repo.AppendMessageAsync(new ChatMessage { SessionId = session.Id, Role = MessageRole.User, Content = "first" }, CancellationToken.None);
-        await repo.AppendMessageAsync(new ChatMessage { SessionId = session.Id, Role = MessageRole.Assistant, Content = "second" }, CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
+        db.ChatMessages.Add(new ChatMessage { SessionId = session.Id, SequenceNumber = 2, Role = MessageRole.Assistant, Content = "second" });
+        db.ChatMessages.Add(new ChatMessage { SessionId = session.Id, SequenceNumber = 1, Role = MessageRole.User, Content = "first" });
+        await db.SaveChangesAsync();
 
         var messages = await repo.GetMessagesAsync(session.Id, CancellationToken.None);
 
-        messages.Should().HaveCount(2);
-        messages[0].Content.Should().Be("first");
-        messages[1].Content.Should().Be("second");
+        messages.Select(m => m.Content).Should().Equal("first", "second");
     }
 
     [Fact]
@@ -118,10 +73,10 @@ public class ChatSessionRepositoryTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
 
         const string toolCallsJson = """[{"ToolCallId":"abc","Name":"web_search","ArgumentsJson":"{\"query\":\"weather\"}"}]""";
-        await repo.AppendMessageAsync(new ChatMessage
+        await TestSeed.MessageAsync(db, new ChatMessage
         {
             SessionId = session.Id,
             Role = MessageRole.Assistant,
@@ -139,11 +94,11 @@ public class ChatSessionRepositoryTests
     {
         await using var db = NewContext();
         var repo = new ChatSessionRepository(db);
-        var session = await repo.CreateSessionAsync(null, "llama3.1:8b", CancellationToken.None);
-        var assistantMessage = await repo.AppendMessageAsync(
+        var session = await TestSeed.SessionAsync(db, null, "llama3.1:8b", CancellationToken.None);
+        var assistantMessage = await TestSeed.MessageAsync(db,
             new ChatMessage { SessionId = session.Id, Role = MessageRole.Assistant, Content = "" }, CancellationToken.None);
 
-        var invocation = await repo.CreateToolInvocationAsync(new ToolInvocation
+        var invocation = await TestSeed.ToolInvocationAsync(db, new ToolInvocation
         {
             SessionId = session.Id,
             RequestingMessageId = assistantMessage.Id,
@@ -157,7 +112,7 @@ public class ChatSessionRepositoryTests
         (await repo.GetPendingApprovalsAsync(assistantMessage.Id, CancellationToken.None)).Should().ContainSingle(t => t.Id == invocation.Id);
 
         invocation.Status = ToolInvocationStatus.Approved;
-        await repo.UpdateToolInvocationAsync(invocation, CancellationToken.None);
+        await db.SaveChangesAsync();
 
         (await repo.HasPendingApprovalsAsync(session.Id, CancellationToken.None)).Should().BeFalse();
     }

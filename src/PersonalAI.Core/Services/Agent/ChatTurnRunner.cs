@@ -1,16 +1,16 @@
 using System.Collections.Concurrent;
-using PersonalAI.Core.Interfaces;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace PersonalAI.Core.Services.Agent;
 
-/// <summary>In-memory registry of running chat turns. Singleton, and deliberately not persisted: the API runs
-/// as one replica (see CLAUDE.md), and a turn can't survive a process restart anyway — keeping "is running"
+/// <summary>Runs chat turns in the background, at most one per session, independent of the HTTP request that
+/// started them — a page reload or a dropped connection doesn't cancel the turn. Singleton, and deliberately not
+/// persisted: the API runs as one replica (see CLAUDE.md), and a turn can't survive a process restart anyway — keeping "is running"
 /// out of the DB means a crash can never leave a session stuck looking busy. Anything a crash does leave
 /// behind (an Assistant tool call with no result) is still papered over at send time by
-/// ChatAgentService.RepairOrphanedToolCalls.</summary>
-public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<ChatTurnRunner> logger) : IChatTurnRunner
+/// ChatAgentService.AnswerOrphanedToolCalls.</summary>
+public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<ChatTurnRunner> logger)
 {
     public const string UserStopReason = "stopped by the user";
     public const string ShutdownStopReason = "the server shut down";
@@ -18,7 +18,9 @@ public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<Ch
 
     private readonly ConcurrentDictionary<Guid, ChatTurn> _turns = new();
 
-    public ChatTurn? TryStart(Guid sessionId, Func<IChatAgentService, CancellationToken, IAsyncEnumerable<AgentStreamEvent>> body)
+    /// <summary>Starts <paramref name="body"/> on a fresh DI scope's <see cref="ChatAgentService"/>. Returns
+    /// null when the session already has a turn running.</summary>
+    public ChatTurn? TryStart(Guid sessionId, Func<ChatAgentService, CancellationToken, IAsyncEnumerable<AgentStreamEvent>> body)
     {
         var turn = new ChatTurn(sessionId, DateTimeOffset.UtcNow);
         if (!_turns.TryAdd(sessionId, turn)) return null;
@@ -26,10 +28,19 @@ public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<Ch
         return turn;
     }
 
-    public ChatTurn? GetActive(Guid sessionId) => _turns.TryGetValue(sessionId, out var turn) ? turn : null;
+    /// <summary>The session's running turn, or null.</summary>
+    public ChatTurn? GetActive(Guid sessionId)
+    {
+        return _turns.TryGetValue(sessionId, out var turn) ? turn : null;
+    }
 
-    public bool TryStop(Guid sessionId) => GetActive(sessionId)?.RequestStop(UserStopReason) ?? false;
+    /// <summary>Asks the session's running turn to stop. False when nothing is running.</summary>
+    public bool TryStop(Guid sessionId)
+    {
+        return GetActive(sessionId)?.RequestStop(UserStopReason) ?? false;
+    }
 
+    /// <summary>Stops every running turn (server shutdown) and waits for each to record its interruption.</summary>
     public async Task StopAllAsync(CancellationToken ct)
     {
         var turns = _turns.Values.ToList();
@@ -45,12 +56,12 @@ public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<Ch
         }
     }
 
-    private async Task RunAsync(ChatTurn turn, Func<IChatAgentService, CancellationToken, IAsyncEnumerable<AgentStreamEvent>> body)
+    private async Task RunAsync(ChatTurn turn, Func<ChatAgentService, CancellationToken, IAsyncEnumerable<AgentStreamEvent>> body)
     {
         try
         {
             await using var scope = scopeFactory.CreateAsyncScope();
-            var agent = scope.ServiceProvider.GetRequiredService<IChatAgentService>();
+            var agent = scope.ServiceProvider.GetRequiredService<ChatAgentService>();
             try
             {
                 await foreach (var evt in body(agent, turn.Token).WithCancellation(turn.Token))
@@ -93,7 +104,7 @@ public sealed class ChatTurnRunner(IServiceScopeFactory scopeFactory, ILogger<Ch
             // Fresh scope: the interrupted scope's DbContext may still track entities whose SaveChanges was
             // cancelled mid-flight, and saving through it would persist them with stale sequence numbers.
             await using var scope = scopeFactory.CreateAsyncScope();
-            var agent = scope.ServiceProvider.GetRequiredService<IChatAgentService>();
+            var agent = scope.ServiceProvider.GetRequiredService<ChatAgentService>();
             using var timeout = new CancellationTokenSource(FinalizeTimeout);
             await agent.FinalizeInterruptedTurnAsync(turn.SessionId, partialText, reason, systemNotice, timeout.Token);
         }

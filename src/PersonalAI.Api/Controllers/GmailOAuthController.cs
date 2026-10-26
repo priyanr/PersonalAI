@@ -20,7 +20,7 @@ public class GmailOAuthController(
     GmailOAuthClient oauthClient,
     GmailOAuthStateStore stateStore,
     ToolConfigCache configCache,
-    IToolConfigRepository configRepo,
+    ToolConfigService toolConfig,
     IHttpClientFactory httpClientFactory,
     IOptions<GmailSettings> gmailSettings) : ControllerBase
 {
@@ -32,7 +32,10 @@ public class GmailOAuthController(
     private const string GoogleUserInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo";
 
     [HttpGet("redirect-uri")]
-    public ActionResult<object> RedirectUri() => Ok(new { redirectUri = BuildRedirectUri() });
+    public ActionResult<object> RedirectUri()
+    {
+        return Ok(new { redirectUri = BuildRedirectUri() });
+    }
 
     [HttpGet("authorize-url")]
     public ActionResult<object> AuthorizeUrl()
@@ -89,8 +92,7 @@ public class GmailOAuthController(
                 ["TokenExpiresAtUtc"] = DateTime.UtcNow.AddSeconds(tokens.ExpiresIn).ToString("o"),
                 ["ConnectedEmail"] = email
             };
-            await configRepo.SetValuesAsync("gmail", updates, ct);
-            configCache.MergeTool("gmail", updates);
+            await toolConfig.SaveValues("gmail", updates, ct);
 
             return Redirect(settingsUrl);
         }
@@ -120,8 +122,13 @@ public class GmailOAuthController(
         }
     }
 
-    private string BuildRedirectUri() => $"{Request.Scheme}://{Request.Host}{Request.PathBase}/api/tools/gmail/oauth/callback";
+    private string BuildRedirectUri()
+    {
+        return $"{Request.Scheme}://{Request.Host}{Request.PathBase}/api/tools/gmail/oauth/callback";
+    }
 
-    private static string ToQueryString(Dictionary<string, string> query) =>
-        "?" + string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+    private static string ToQueryString(Dictionary<string, string> query)
+    {
+        return "?" + string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+    }
 }

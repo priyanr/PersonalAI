@@ -1184,6 +1184,24 @@ input[list]::-webkit-calendar-picker-indicator {
   font-size: 0.88rem;
 }
 
+.run-transcript-entry.is-user {
+  background: var(--sunk);
+  border-left-color: var(--muted);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
+.run-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.run-chat textarea {
+  width: 100%;
+  resize: vertical;
+}
+
 .run-transcript-entry.is-error {
   border-left-color: var(--error);
   background: var(--error-wash);
@@ -1962,4 +1980,12 @@ button.chip-toggle[aria-pressed="true"]:hover:not(:disabled) {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.ssh-server-group {
+  margin: 1.5rem 0;
+}
+
+.agent-data-panel {
+  margin: 1.5rem 0;
 }

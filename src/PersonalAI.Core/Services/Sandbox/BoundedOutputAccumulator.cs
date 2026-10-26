@@ -2,21 +2,9 @@ using System.Text;
 
 namespace PersonalAI.Core.Services.Sandbox;
 
-/// <summary>Accumulates one stream of a sandbox exec (stdout or stderr) under a fixed character budget,
-/// keeping BOTH ends of the output.
-///
-/// Two things here are deliberate and easy to get wrong:
-///
-/// 1. <b>Keep the tail, not just the head.</b> Shell output puts the interesting part at the END — the
-///    compiler error, the stack trace, "ERROR: Failed building wheel". Capping by keeping the first N
-///    characters and dropping the rest hands the model the banner and throws away the diagnosis. So the
-///    budget is split: a smaller head (enough to see what the command started doing) and a larger rolling
-///    tail, with a note recording how much was dropped in between.
-///
-/// 2. <b>Decode across chunk boundaries.</b> Output arrives as base64'd byte chunks cut at an arbitrary
-///    byte offset, so a multi-byte UTF-8 sequence is routinely split across two chunks. Calling
-///    Encoding.UTF8.GetString on each chunk independently turns every such character into U+FFFD. A single
-///    stateful Decoder carries the partial sequence over to the next chunk instead.</summary>
+/// <summary>Collects one stream of a sandbox exec (stdout or stderr) under a character budget. It keeps a small head
+/// and a larger tail, because a shell puts the error at the end. One stateful decoder spans all chunks, because a
+/// chunk can end in the middle of a multi-byte UTF-8 character.</summary>
 internal sealed class BoundedOutputAccumulator
 {
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();

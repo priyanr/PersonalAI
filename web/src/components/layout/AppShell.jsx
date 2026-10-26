@@ -4,9 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSelector } from "react-redux";
 import { logout } from "@/lib/auth";
+import AlertsNavBadge from "@/components/alerts/AlertsNavBadge";
 
 const NAV = [
   { href: "/sessions", label: "Chat", match: ["/sessions"] },
+  { href: "/dashboards", label: "Dashboards", match: ["/dashboards"] },
+  { href: "/alerts", label: "Alerts", match: ["/alerts"] },
   { href: "/agents", label: "Agents", match: ["/agents"] },
   { href: "/settings/skills", label: "Skills", match: ["/settings/skills", "/skills"] },
   { href: "/models", label: "Models", match: ["/models"] }
@@ -17,6 +20,15 @@ const SETTINGS = { href: "/settings", label: "Settings" };
 function isActive(pathname, match) {
   return match.some((m) => pathname === m || pathname.startsWith(`${m}/`));
 }
+
+function navActive(pathname, item) {
+  if (item.href === "/dashboards") return isActive(pathname, item.match) || isDashboardPage(pathname);
+  if (item.href === "/agents") return isActive(pathname, item.match) && !isDashboardPage(pathname);
+  return isActive(pathname, item.match);
+}
+
+// /agents/<id>/dashboard belongs to Dashboards, not Agents.
+const isDashboardPage = (pathname) => pathname.startsWith("/agents/") && pathname.endsWith("/dashboard");
 
 export default function AppShell({ children }) {
   const pathname = usePathname();
@@ -38,9 +50,10 @@ export default function AppShell({ children }) {
             <Link
               key={item.href}
               href={item.href}
-              aria-current={isActive(pathname, item.match) ? "page" : undefined}
+              aria-current={navActive(pathname, item) ? "page" : undefined}
             >
               {item.label}
+              {item.href === "/alerts" && <AlertsNavBadge />}
             </Link>
           ))}
         </nav>

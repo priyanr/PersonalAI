@@ -12,6 +12,13 @@ public class Agent
     public required string Name { get; set; }
     public string? Description { get; set; }
 
+    /// <summary>Selects the agent's behavior; General is the original prompt-driven agent.</summary>
+    public AgentType Type { get; set; } = AgentType.General;
+
+    /// <summary>Type-specific settings as JSON, validated and normalized by the type's
+    /// IAgentTypeDescriptor. "{}" for General.</summary>
+    public string TypeConfigJson { get; set; } = "{}";
+
     /// <summary>The agent's system prompt — instructions for when/how to invoke its allowed skills.</summary>
     public required string Prompt { get; set; }
 
